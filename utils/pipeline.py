@@ -4,8 +4,14 @@ from utils.hashing import phash_bytes
 from utils.keywords import score
 import aiohttp
 import asyncio
+from datetime import datetime
+from io import BytesIO
+from pathlib import Path
 from core.logger import log
 from core.database import db, FEATURE_OCR_DELETE_MESSAGE, FEATURE_OCR_GIVE_ROLE
+
+MAX_LOG_FILES = 10
+DETECTED_IMAGES_DIR = Path("detected images")
 
 
 async def download_image(url):
@@ -14,6 +20,31 @@ async def download_image(url):
 			if resp.status == 200:
 				return await resp.read()
 	return None
+
+
+def log_filename(index: int, attachment: discord.Attachment) -> str:
+	filename = attachment.filename or f"image_{index + 1}.png"
+	filename = "".join(char if char.isalnum() or char in "._-" else "_" for char in filename)
+	return f"{index + 1}_{filename}"
+
+
+def save_detected_images(
+	message: discord.Message,
+	image_attachments: list[discord.Attachment],
+	downloaded_images: dict[int, bytes],
+) -> Path:
+	timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+	output_dir = DETECTED_IMAGES_DIR / f"{timestamp}_{message.id}"
+	output_dir.mkdir(parents=True, exist_ok=True)
+
+	for idx, att in enumerate(image_attachments):
+		image_bytes = downloaded_images.get(idx)
+		if not image_bytes:
+			continue
+
+		(output_dir / log_filename(idx, att)).write_bytes(image_bytes)
+
+	return output_dir
 
 
 async def process_message_pipeline(bot, message: discord.Message):
@@ -34,6 +65,7 @@ async def process_message_pipeline(bot, message: discord.Message):
 
 	all_hits = {}
 	matched = False
+	downloaded_images: dict[int, bytes] = {}
 
 	loop = asyncio.get_running_loop()
 
@@ -47,6 +79,7 @@ async def process_message_pipeline(bot, message: discord.Message):
 		image_bytes = await download_image(att.url)
 		if not image_bytes:
 			continue
+		downloaded_images[idx] = image_bytes
 
 		ph = phash_bytes(image_bytes)
 
@@ -68,6 +101,13 @@ async def process_message_pipeline(bot, message: discord.Message):
 
 	if not matched:
 		return
+
+	for idx, att in enumerate(image_attachments):
+		if idx in downloaded_images:
+			continue
+		image_bytes = await download_image(att.url)
+		if image_bytes:
+			downloaded_images[idx] = image_bytes
 
 	embed = discord.Embed(
 		title="Suspicious Attachment Detected",
@@ -96,19 +136,22 @@ async def process_message_pipeline(bot, message: discord.Message):
 		)
 
 	# ---------------- ATTACHMENTS ----------------
+	files = []
 	if image_attachments:
-		# Show first image as embed preview
-		embed.set_image(url=image_attachments[0].url)
+		for idx, att in enumerate(image_attachments[:MAX_LOG_FILES]):
+			image_bytes = downloaded_images.get(idx)
+			if not image_bytes:
+				continue
 
-		# List all attachment URLs
-		attachment_text = "\n".join(
-			f"{i+1}. {att.url}"
-			for i, att in enumerate(image_attachments)
-		)
+			filename = log_filename(idx, att)
+			files.append(discord.File(BytesIO(image_bytes), filename=filename))
+
+		if files:
+			embed.set_image(url=f"attachment://{files[0].filename}")
 
 		embed.add_field(
 			name="Attachments",
-			value=attachment_text[:1024],
+			value=f"Reuploaded {len(files)} of {len(image_attachments)} image attachment(s).",
 			inline=False
 		)
 	if db.is_feature_enabled(message.guild.id, FEATURE_OCR_GIVE_ROLE):
@@ -128,4 +171,16 @@ async def process_message_pipeline(bot, message: discord.Message):
 
 	# ---------------- SEND ----------------
 	if log_channel:
-		await log_channel.send(embed=embed)
+		try:
+			await log_channel.send(embed=embed, files=files)
+		except discord.DiscordException as exc:
+			log.info(f"[LOG SEND ERROR] message={message.id} error={exc}")
+			output_dir = save_detected_images(message, image_attachments, downloaded_images)
+			embed.set_image(url=None)
+			embed.set_field_at(
+				len(embed.fields) - 1,
+				name="Attachments",
+				value=f"Image reupload failed. Saved locally to `{output_dir}`.",
+				inline=False,
+			)
+			await log_channel.send(embed=embed)

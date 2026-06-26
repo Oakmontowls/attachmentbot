@@ -25,26 +25,47 @@ class PressureState:
 
 class PressureModerator:
 	def __init__(self):
-		self.user_states: dict[tuple[int, int], PressureState] = {}
+		self.user_states: dict[tuple[int, int, int], PressureState] = {}
 
 	def reset_user(self, guild_id: int, user_id: int):
-		self.user_states.pop((guild_id, user_id), None)
+		for key in list(self.user_states):
+			if key[0] == guild_id and key[2] == user_id:
+				self.user_states.pop(key, None)
 
 	def reset_guild(self, guild_id: int):
 		for key in list(self.user_states):
 			if key[0] == guild_id:
 				self.user_states.pop(key, None)
 
-	def current_pressure(self, guild_id: int, user_id: int) -> int:
-		state = self.user_states.get((guild_id, user_id))
+	def current_pressure(self, guild_id: int, channel_id: int, user_id: int) -> int:
+		state = self.user_states.get((guild_id, channel_id, user_id))
 		if not state:
 			return 0
 
 		settings = db.get_pressure_settings(guild_id)
 		return round(self.decayed_pressure(state, settings, time.monotonic()))
 
-	def get_state(self, guild_id: int, user_id: int) -> PressureState | None:
-		return self.user_states.get((guild_id, user_id))
+	def get_state(self, guild_id: int, channel_id: int, user_id: int) -> PressureState | None:
+		return self.user_states.get((guild_id, channel_id, user_id))
+
+	def current_channel_pressures(self, guild_id: int, user_id: int) -> list[tuple[int, int, int]]:
+		settings = db.get_pressure_settings(guild_id)
+		now = time.monotonic()
+		pressures = []
+
+		for key, state in self.user_states.items():
+			state_guild_id, channel_id, state_user_id = key
+			if state_guild_id != guild_id or state_user_id != user_id:
+				continue
+
+			current = round(self.decayed_pressure(state, settings, now))
+			if current <= 0:
+				continue
+
+			threshold = self.threshold_for_channel(guild_id, channel_id, settings)
+			pressures.append((channel_id, current, threshold))
+
+		return sorted(pressures, key=lambda row: row[1], reverse=True)
 
 	def decayed_pressure(self, state: PressureState, settings: dict, now: float) -> float:
 		if not state.last_seen:
@@ -199,7 +220,7 @@ class PressureModerator:
 			return False
 
 		now = time.monotonic()
-		key = (message.guild.id, message.author.id)
+		key = (message.guild.id, message.channel.id, message.author.id)
 		state = self.user_states.setdefault(key, PressureState(last_seen=now))
 
 		state.pressure = self.decayed_pressure(state, settings, now)
@@ -217,7 +238,8 @@ class PressureModerator:
 			f"pressure={round(state.pressure)}/{threshold} channel={message.channel.id} reasons={', '.join(reasons)}"
 		)
 
-		await self.delete_threshold_message(message)
+		if not already_over_threshold or settings["delete_message"]:
+			await self.delete_threshold_message(message)
 		if already_over_threshold:
 			reasons.insert(0, "already over threshold")
 

@@ -1,6 +1,5 @@
 import discord
 import json
-import time
 from discord import app_commands
 from discord.ext import commands
 from core.queue_worker import MESSAGE_QUEUE
@@ -357,16 +356,12 @@ class ModerationCog(commands.Cog):
 			return
 
 		settings = db.get_pressure_settings(interaction.guild_id)
-		current = pressure_moderator.current_pressure(interaction.guild_id, member.id)
-		state = pressure_moderator.get_state(interaction.guild_id, member.id)
-		global_threshold = settings["threshold"]
-		channel_thresholds = settings["channel_thresholds"]
-
-		override_text = "None"
-		if channel_thresholds:
-			override_text = ", ".join(
-				f"<#{channel_id}>: {threshold:g}"
-				for channel_id, threshold in sorted(channel_thresholds.items())
+		channel_pressures = pressure_moderator.current_channel_pressures(interaction.guild_id, member.id)
+		pressure_text = "None"
+		if channel_pressures:
+			pressure_text = "\n".join(
+				f"<#{channel_id}>: {current}/{threshold}"
+				for channel_id, current, threshold in channel_pressures
 			)
 
 		embed = discord.Embed(
@@ -375,16 +370,8 @@ class ModerationCog(commands.Cog):
 			description=f"Member: {member.mention}",
 		)
 		embed.add_field(name="Pressure Enabled", value=str(settings["enabled"]), inline=True)
-		embed.add_field(name="Current Pressure", value=str(current), inline=True)
-		embed.add_field(name="Global Threshold", value=f"{global_threshold:g}", inline=True)
 		embed.add_field(name="Decay", value=f"{settings['decay_per_second']:g}/sec", inline=True)
-		if state:
-			seconds_ago = max(0.0, time.monotonic() - state.last_seen)
-			embed.add_field(name="Last Tracked Message", value=f"{seconds_ago:.1f}s ago", inline=True)
-			embed.add_field(name="Raw Stored Pressure", value=str(round(state.pressure)), inline=True)
-		else:
-			embed.add_field(name="Last Tracked Message", value="None since restart", inline=True)
-		embed.add_field(name="Channel Threshold Overrides", value=override_text[:1024], inline=False)
+		embed.add_field(name="Channel Pressure", value=pressure_text[:1024], inline=False)
 		await interaction.response.send_message(embed=embed, ephemeral=True)
 
 	@pressure.command(name="set", description="Set pressure moderation options.")
@@ -404,14 +391,12 @@ class ModerationCog(commands.Cog):
 		banned_word="Pressure added per configured banned word hit.",
 		new_member="Pressure added while the user is within the new-member window.",
 		new_member_hours="Hours after joining where new-member pressure applies.",
-		delete_message="Delete the triggering message.",
+		delete_message="Delete messages posted while the user is already over the pressure threshold.",
 		give_role="Give the configured timeout role.",
 		role_duration_minutes="Minutes before the pressure timeout role is removed. Use 0 for permanent.",
-		log_channel="Channel for pressure moderation logs.",
-		clear_log_channel="Clear the pressure log channel and fall back to the OCR log channel.",
-		channel="Channel for a threshold override.",
+		log_channel="Channel for pressure moderation logs. Leave every option blank to fall back to OCR logs.",
+		channel="Channel for a threshold override. Omit channel_threshold to remove the override.",
 		channel_threshold="Whole-number override threshold for the selected channel.",
-		remove_channel_threshold="Remove the selected channel's threshold override.",
 	)
 	async def pressure_set(
 		self,
@@ -435,10 +420,8 @@ class ModerationCog(commands.Cog):
 		give_role: bool | None = None,
 		role_duration_minutes: app_commands.Range[int, 0, 10080] | None = None,
 		log_channel: discord.TextChannel | None = None,
-		clear_log_channel: bool | None = None,
 		channel: discord.TextChannel | None = None,
 		channel_threshold: app_commands.Range[int, 1, 10000] | None = None,
-		remove_channel_threshold: bool | None = None,
 	):
 		if not await self.require_manager(interaction):
 			return
@@ -473,25 +456,19 @@ class ModerationCog(commands.Cog):
 		if log_channel:
 			db.update_pressure_settings(interaction.guild_id, log_channel_id=log_channel.id)
 			changes.append(f"pressure log channel {log_channel.mention}")
-		elif clear_log_channel:
-			db.update_pressure_settings(interaction.guild_id, log_channel_id=None)
-			changes.append("cleared pressure log channel")
 
 		if enabled is False:
 			pressure_moderator.reset_guild(interaction.guild_id)
 
-		if remove_channel_threshold and channel:
-			db.remove_pressure_channel_threshold(interaction.guild_id, channel.id)
-			changes.append(f"removed {channel.mention} override")
-		elif channel_threshold is not None:
+		if channel_threshold is not None:
 			if not channel:
 				await interaction.response.send_message("Choose a channel when setting a channel threshold.", ephemeral=True)
 				return
 			db.set_pressure_channel_threshold(interaction.guild_id, channel.id, channel_threshold)
 			changes.append(f"{channel.mention} threshold")
-		elif remove_channel_threshold:
-			await interaction.response.send_message("Choose a channel when removing a channel threshold.", ephemeral=True)
-			return
+		elif channel:
+			db.remove_pressure_channel_threshold(interaction.guild_id, channel.id)
+			changes.append(f"removed {channel.mention} override")
 
 		if not changes:
 			await interaction.response.send_message("No pressure settings were changed.", ephemeral=True)

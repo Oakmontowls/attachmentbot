@@ -5,34 +5,17 @@ from pathlib import Path
 from typing import Optional
 
 from config import GUILD_CONFIG, KEYWORDS
+from core.defaults import (
+	DEFAULT_DETECTION_THRESHOLD,
+	DEFAULT_OCR_KEYWORDS,
+	DEFAULT_PRESSURE_BANNED_WORDS,
+	DEFAULT_PRESSURE_SETTINGS,
+)
 
 DB_PATH = Path("attachmentbot.sqlite3")
 
 FEATURE_OCR_GIVE_ROLE = "ocr_give_role"
 FEATURE_OCR_DELETE_MESSAGE = "ocr_delete_message"
-
-DEFAULT_PRESSURE_SETTINGS = {
-	"enabled": 0,
-	"log_channel_id": None,
-	"threshold": 100,
-	"decay_per_second": 3.3,
-	"base_pressure": 10,
-	"attachment_pressure": 15,
-	"embed_pressure": 15,
-	"mention_pressure": 10,
-	"link_pressure": 15,
-	"duplicate_pressure": 35,
-	"new_member_pressure": 0,
-	"line_pressure": 5,
-	"solo_emote_pressure": 30,
-	"gif_pressure": 50,
-	"banned_word_pressure": 500,
-	"new_member_hours": 24,
-	"role_duration_seconds": 3600,
-	"delete_message": 0,
-	"give_role": 0,
-}
-
 
 class BotDatabase:
 	def __init__(self, path: Path = DB_PATH):
@@ -113,7 +96,7 @@ class BotDatabase:
 				mention_pressure INTEGER NOT NULL DEFAULT 10,
 				link_pressure INTEGER NOT NULL DEFAULT 15,
 				duplicate_pressure INTEGER NOT NULL DEFAULT 35,
-				new_member_pressure INTEGER NOT NULL DEFAULT 0,
+				new_member_pressure INTEGER NOT NULL DEFAULT 20,
 				line_pressure INTEGER NOT NULL DEFAULT 5,
 				solo_emote_pressure INTEGER NOT NULL DEFAULT 30,
 				gif_pressure INTEGER NOT NULL DEFAULT 50,
@@ -239,7 +222,7 @@ class BotDatabase:
 
 	def seed_from_config(self):
 		for guild_id, config in GUILD_CONFIG.items():
-			self.ensure_guild(guild_id)
+			self.ensure_guild(guild_id, seed_defaults=False)
 			existing_keywords = self.conn.execute(
 				"SELECT COUNT(*) FROM guild_keywords WHERE guild_id = ?",
 				(guild_id,),
@@ -267,16 +250,52 @@ class BotDatabase:
 					data.get("aliases", []),
 				)
 
-	def ensure_guild(self, guild_id: int):
-		self.conn.execute(
+	def ensure_guild(self, guild_id: int, seed_defaults: bool = True):
+		result = self.conn.execute(
 			"INSERT OR IGNORE INTO guild_settings (guild_id) VALUES (?)",
 			(guild_id,),
 		)
+		created = result.rowcount > 0
 		self.conn.execute(
 			"INSERT OR IGNORE INTO pressure_settings (guild_id) VALUES (?)",
 			(guild_id,),
 		)
+		if created and seed_defaults:
+			self.seed_default_guild(guild_id)
 		self.conn.commit()
+
+	def seed_default_guild(self, guild_id: int):
+		self.conn.execute(
+			"""
+			UPDATE guild_settings
+			SET enabled = 0,
+				log_channel_id = NULL,
+				role_id = NULL,
+				detection_threshold = ?,
+				updated_at = CURRENT_TIMESTAMP
+			WHERE guild_id = ?
+			""",
+			(DEFAULT_DETECTION_THRESHOLD, guild_id),
+		)
+
+		pressure_updates = {
+			key: int(bool(value)) if key in {"enabled", "delete_message", "give_role"} else value
+			for key, value in DEFAULT_PRESSURE_SETTINGS.items()
+		}
+		assignments = ", ".join(f"{key} = ?" for key in pressure_updates)
+		self.conn.execute(
+			f"UPDATE pressure_settings SET {assignments}, updated_at = CURRENT_TIMESTAMP WHERE guild_id = ?",
+			[*pressure_updates.values(), guild_id],
+		)
+
+		for keyword, data in DEFAULT_OCR_KEYWORDS.items():
+			self.insert_keyword(guild_id, keyword, data["points"], data.get("aliases", []))
+
+		for word in DEFAULT_PRESSURE_BANNED_WORDS:
+			self.conn.execute(
+				"INSERT OR IGNORE INTO pressure_banned_words (guild_id, word) VALUES (?, ?)",
+				(guild_id, word),
+			)
 
 	def update_guild_settings(self, guild_id: int, **values):
 		self.ensure_guild(guild_id)
@@ -554,8 +573,7 @@ class BotDatabase:
 		).fetchall()
 		return {row["channel_id"] for row in rows}
 
-	def add_keyword(self, guild_id: int, keyword: str, points: int, aliases=None):
-		self.ensure_guild(guild_id)
+	def insert_keyword(self, guild_id: int, keyword: str, points: int, aliases=None):
 		keyword = keyword.strip().lower()
 		if not keyword:
 			raise ValueError("Keyword cannot be empty.")
@@ -568,10 +586,20 @@ class BotDatabase:
 			""",
 			(guild_id, keyword, points),
 		)
-		self.conn.commit()
 
 		for alias in aliases or []:
-			self.add_alias(guild_id, keyword, alias)
+			keyword_id = self.get_keyword_id(guild_id, keyword)
+			alias = alias.strip().lower()
+			if alias and keyword_id:
+				self.conn.execute(
+					"INSERT OR IGNORE INTO keyword_aliases (keyword_id, alias) VALUES (?, ?)",
+					(keyword_id, alias),
+				)
+
+	def add_keyword(self, guild_id: int, keyword: str, points: int, aliases=None):
+		self.ensure_guild(guild_id)
+		self.insert_keyword(guild_id, keyword, points, aliases)
+		self.conn.commit()
 
 	def remove_keyword(self, guild_id: int, keyword: str):
 		self.conn.execute(
