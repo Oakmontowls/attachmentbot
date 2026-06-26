@@ -67,6 +67,30 @@ class PressureModerator:
 
 		return sorted(pressures, key=lambda row: row[1], reverse=True)
 
+	def current_channel_pressures_for_guild(
+		self,
+		guild: discord.Guild,
+		user_id: int,
+	) -> list[tuple[int, int, int]]:
+		settings = db.get_pressure_settings(guild.id)
+		now = time.monotonic()
+		pressures = []
+
+		for key, state in self.user_states.items():
+			state_guild_id, channel_id, state_user_id = key
+			if state_guild_id != guild.id or state_user_id != user_id:
+				continue
+
+			current = round(self.decayed_pressure(state, settings, now))
+			if current <= 0:
+				continue
+
+			channel = guild.get_channel_or_thread(channel_id)
+			threshold = self.threshold_for_channel_object(guild.id, channel_id, channel, settings)
+			pressures.append((channel_id, current, threshold))
+
+		return sorted(pressures, key=lambda row: row[1], reverse=True)
+
 	def decayed_pressure(self, state: PressureState, settings: dict, now: float) -> float:
 		if not state.last_seen:
 			return 0.0
@@ -79,6 +103,29 @@ class PressureModerator:
 		if override is not None:
 			return override
 		return settings["threshold"]
+
+	def threshold_for_channel_object(
+		self,
+		guild_id: int,
+		channel_id: int,
+		channel,
+		settings: dict,
+	) -> int:
+		threshold = self.threshold_for_channel(guild_id, channel_id, settings)
+		parent_id = getattr(channel, "parent_id", None) if channel else None
+		if parent_id is None:
+			return threshold
+
+		parent_override = db.get_pressure_channel_threshold(guild_id, parent_id)
+		return parent_override if parent_override is not None else threshold
+
+	def threshold_for_message(self, message: discord.Message, settings: dict) -> int:
+		return self.threshold_for_channel_object(
+			message.guild.id,
+			message.channel.id,
+			message.channel,
+			settings,
+		)
 
 	def normalize_content(self, content: str) -> str:
 		return " ".join(content.lower().split())
@@ -224,7 +271,7 @@ class PressureModerator:
 		state = self.user_states.setdefault(key, PressureState(last_seen=now))
 
 		state.pressure = self.decayed_pressure(state, settings, now)
-		threshold = self.threshold_for_channel(message.guild.id, message.channel.id, settings)
+		threshold = self.threshold_for_message(message, settings)
 		already_over_threshold = state.pressure >= threshold
 		increment, reasons = self.calculate_increment(message, settings, state)
 		state.pressure += increment
@@ -238,7 +285,7 @@ class PressureModerator:
 			f"pressure={round(state.pressure)}/{threshold} channel={message.channel.id} reasons={', '.join(reasons)}"
 		)
 
-		if not already_over_threshold or settings["delete_message"]:
+		if settings["delete_message"]:
 			await self.delete_threshold_message(message)
 		if already_over_threshold:
 			reasons.insert(0, "already over threshold")

@@ -146,12 +146,9 @@ async def process_message_pipeline(bot, message: discord.Message):
 			filename = log_filename(idx, att)
 			files.append(discord.File(BytesIO(image_bytes), filename=filename))
 
-		if files:
-			embed.set_image(url=f"attachment://{files[0].filename}")
-
 		embed.add_field(
 			name="Attachments",
-			value=f"Reuploaded {len(files)} of {len(image_attachments)} image attachment(s).",
+			value=f"{len(image_attachments)} image attachments",
 			inline=False
 		)
 	if db.is_feature_enabled(message.guild.id, FEATURE_OCR_GIVE_ROLE):
@@ -172,15 +169,13 @@ async def process_message_pipeline(bot, message: discord.Message):
 	# ---------------- SEND ----------------
 	if log_channel:
 		try:
-			await log_channel.send(embed=embed, files=files)
+			await log_channel.send(embed=embed)
+			if files:
+				await log_channel.send(files=files)
 		except discord.DiscordException as exc:
 			log.info(f"[LOG SEND ERROR] message={message.id} error={exc}")
 			output_dir = save_detected_images(message, image_attachments, downloaded_images)
-			embed.set_image(url=None)
-			embed.set_field_at(
-				len(embed.fields) - 1,
-				name="Attachments",
-				value=f"Image reupload failed. Saved locally to `{output_dir}`.",
-				inline=False,
+			await log_channel.send(
+				f"Image reupload failed for detected message {message.id}. "
+				f"Saved locally to `{output_dir}`."
 			)
-			await log_channel.send(embed=embed)

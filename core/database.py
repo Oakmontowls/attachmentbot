@@ -4,9 +4,10 @@ import re
 from pathlib import Path
 from typing import Optional
 
-from config import GUILD_CONFIG, KEYWORDS
 from core.defaults import (
 	DEFAULT_DETECTION_THRESHOLD,
+	DEFAULT_OCR_SINGLE_IMAGE_LOOKBACK_DAYS,
+	DEFAULT_OCR_SINGLE_IMAGE_MAX_MESSAGES,
 	DEFAULT_OCR_KEYWORDS,
 	DEFAULT_PRESSURE_BANNED_WORDS,
 	DEFAULT_PRESSURE_SETTINGS,
@@ -25,7 +26,6 @@ class BotDatabase:
 		self.conn.execute("PRAGMA foreign_keys = ON")
 		self.setup()
 		self.migrate_pressure_scale()
-		self.seed_from_config()
 
 	def setup(self):
 		self.conn.executescript(
@@ -134,8 +134,20 @@ class BotDatabase:
 			);
 			"""
 		)
+		self.add_missing_guild_columns()
 		self.add_missing_pressure_columns()
 		self.conn.commit()
+
+	def add_missing_guild_columns(self):
+		rows = self.conn.execute("PRAGMA table_info(guild_settings)").fetchall()
+		existing = {row["name"] for row in rows}
+		columns = {
+			"single_image_max_messages": "INTEGER NOT NULL DEFAULT 0",
+			"single_image_lookback_days": "INTEGER NOT NULL DEFAULT 7",
+		}
+		for column, definition in columns.items():
+			if column not in existing:
+				self.conn.execute(f"ALTER TABLE guild_settings ADD COLUMN {column} {definition}")
 
 	def add_missing_pressure_columns(self):
 		rows = self.conn.execute("PRAGMA table_info(pressure_settings)").fetchall()
@@ -220,36 +232,6 @@ class BotDatabase:
 		)
 		self.set_metadata("pressure_defaults", "spec_v2")
 
-	def seed_from_config(self):
-		for guild_id, config in GUILD_CONFIG.items():
-			self.ensure_guild(guild_id, seed_defaults=False)
-			existing_keywords = self.conn.execute(
-				"SELECT COUNT(*) FROM guild_keywords WHERE guild_id = ?",
-				(guild_id,),
-			).fetchone()[0]
-
-			if existing_keywords:
-				continue
-
-			self.update_guild_settings(
-				guild_id,
-				enabled=True,
-				log_channel_id=config.get("log_channel_id"),
-				role_id=config.get("role_id"),
-				detection_threshold=config.get("detection_threshold", 10),
-			)
-
-			for channel_id in config.get("channel_blacklist", []):
-				self.add_blacklisted_channel(guild_id, channel_id)
-
-			for keyword, data in KEYWORDS.items():
-				self.add_keyword(
-					guild_id,
-					keyword,
-					data.get("points", 1),
-					data.get("aliases", []),
-				)
-
 	def ensure_guild(self, guild_id: int, seed_defaults: bool = True):
 		result = self.conn.execute(
 			"INSERT OR IGNORE INTO guild_settings (guild_id) VALUES (?)",
@@ -272,10 +254,17 @@ class BotDatabase:
 				log_channel_id = NULL,
 				role_id = NULL,
 				detection_threshold = ?,
+				single_image_max_messages = ?,
+				single_image_lookback_days = ?,
 				updated_at = CURRENT_TIMESTAMP
 			WHERE guild_id = ?
 			""",
-			(DEFAULT_DETECTION_THRESHOLD, guild_id),
+			(
+				DEFAULT_DETECTION_THRESHOLD,
+				DEFAULT_OCR_SINGLE_IMAGE_MAX_MESSAGES,
+				DEFAULT_OCR_SINGLE_IMAGE_LOOKBACK_DAYS,
+				guild_id,
+			),
 		)
 
 		pressure_updates = {
@@ -304,6 +293,8 @@ class BotDatabase:
 			"log_channel_id",
 			"role_id",
 			"detection_threshold",
+			"single_image_max_messages",
+			"single_image_lookback_days",
 		}
 		updates = {key: value for key, value in values.items() if key in allowed}
 		if not updates:
@@ -335,6 +326,8 @@ class BotDatabase:
 			"log_channel_id": row["log_channel_id"],
 			"role_id": row["role_id"],
 			"detection_threshold": row["detection_threshold"],
+			"single_image_max_messages": row["single_image_max_messages"],
+			"single_image_lookback_days": row["single_image_lookback_days"],
 			"channel_blacklist": self.get_blacklisted_channels(guild_id),
 			"keywords": self.get_keywords(guild_id),
 			"features": self.get_feature_flags(guild_id),

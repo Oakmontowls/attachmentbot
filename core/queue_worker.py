@@ -1,5 +1,4 @@
 import asyncio
-import aiohttp
 from utils.pipeline import process_message_pipeline
 from core.logger import log
 

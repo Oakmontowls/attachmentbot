@@ -1,11 +1,13 @@
 import discord
 import json
+import asyncio
 from discord import app_commands
 from discord.ext import commands
 from core.queue_worker import MESSAGE_QUEUE
 from core.logger import log
 from core.database import db, FEATURE_OCR_DELETE_MESSAGE, FEATURE_OCR_GIVE_ROLE
 from core.pressure import pressure_moderator
+from core.message_activity import message_activity
 
 class ModerationCog(commands.Cog):
 	def __init__(self, bot):
@@ -77,6 +79,13 @@ class ModerationCog(commands.Cog):
 		if not config:
 			return
 
+		previous_message_count = message_activity.count(
+			message.guild.id,
+			message.author.id,
+			config["single_image_lookback_days"],
+		)
+		message_activity.record_live(message)
+
 		if message.channel.id in config["channel_blacklist"]:
 			return
 
@@ -92,7 +101,13 @@ class ModerationCog(commands.Cog):
 			if a.content_type and a.content_type.startswith("image/")
 		]
 
-		if len(images) < 2:
+		scan_single_image = (
+			len(images) == 1
+			and config["single_image_max_messages"] > 0
+			and previous_message_count is not None
+			and previous_message_count < config["single_image_max_messages"]
+		)
+		if len(images) < 2 and not scan_single_image:
 			return
 
 		await MESSAGE_QUEUE.put(message)
@@ -144,6 +159,15 @@ class ModerationCog(commands.Cog):
 		)
 		embed.add_field(name="Enabled", value=str(config["enabled"]), inline=True)
 		embed.add_field(name="Threshold", value=str(config["detection_threshold"]), inline=True)
+		embed.add_field(
+			name="Single Image Scan",
+			value=(
+				f"Fewer than {config['single_image_max_messages']} messages in "
+				f"{config['single_image_lookback_days']} days"
+				if config["single_image_max_messages"] > 0 else "Disabled"
+			),
+			inline=False,
+		)
 		embed.add_field(name="Log Channel", value=log_channel, inline=False)
 		embed.add_field(name="Timeout Role", value=timeout_role, inline=False)
 		embed.add_field(name="Give Role", value=str(features.get(FEATURE_OCR_GIVE_ROLE, False)), inline=True)
@@ -176,6 +200,32 @@ class ModerationCog(commands.Cog):
 
 		db.update_guild_settings(interaction.guild_id, detection_threshold=points)
 		await interaction.response.send_message(f"Detection threshold set to {points}.", ephemeral=True)
+
+	@ocr.command(name="single-image", description="Configure single-image scanning for low-activity users.")
+	@app_commands.describe(
+		max_messages="Scan when the user has fewer earlier messages than this; 0 disables it.",
+		lookback_days="Number of days of message history to count.",
+	)
+	async def set_single_image_scanning(
+		self,
+		interaction: discord.Interaction,
+		max_messages: app_commands.Range[int, 0, 100000],
+		lookback_days: app_commands.Range[int, 1, 365],
+	):
+		if not await self.require_manager(interaction):
+			return
+
+		db.update_guild_settings(
+			interaction.guild_id,
+			single_image_max_messages=max_messages,
+			single_image_lookback_days=lookback_days,
+		)
+		asyncio.create_task(message_activity.initialize_guild(interaction.guild))
+		state = "disabled" if max_messages == 0 else (
+			f"enabled for users with fewer than {max_messages} earlier messages "
+			f"in the last {lookback_days} days"
+		)
+		await interaction.response.send_message(f"Single-image OCR scanning is {state}.", ephemeral=True)
 
 	@ocr.command(name="log-channel", description="Set the channel where detections are logged.")
 	@app_commands.describe(channel="The channel to receive detection logs.")
@@ -356,7 +406,7 @@ class ModerationCog(commands.Cog):
 			return
 
 		settings = db.get_pressure_settings(interaction.guild_id)
-		channel_pressures = pressure_moderator.current_channel_pressures(interaction.guild_id, member.id)
+		channel_pressures = pressure_moderator.current_channel_pressures_for_guild(interaction.guild, member.id)
 		pressure_text = "None"
 		if channel_pressures:
 			pressure_text = "\n".join(
@@ -420,7 +470,7 @@ class ModerationCog(commands.Cog):
 		give_role: bool | None = None,
 		role_duration_minutes: app_commands.Range[int, 0, 10080] | None = None,
 		log_channel: discord.TextChannel | None = None,
-		channel: discord.TextChannel | None = None,
+		channel: discord.TextChannel | discord.ForumChannel | None = None,
 		channel_threshold: app_commands.Range[int, 1, 10000] | None = None,
 	):
 		if not await self.require_manager(interaction):

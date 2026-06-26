@@ -41,8 +41,10 @@ class AttachmentBot(commands.Bot):
 		# start background worker
 		from core.queue_worker import start_worker
 		from core.temporary_roles import start_temporary_role_worker
+		from core.message_activity import message_activity
 		asyncio.create_task(start_worker(self))
 		asyncio.create_task(start_temporary_role_worker(self))
+		asyncio.create_task(message_activity.initialize(self))
 
 bot = AttachmentBot()
 
