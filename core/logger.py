@@ -1,8 +1,9 @@
 import logging
 import sys
 from logging.handlers import RotatingFileHandler
+from pathlib import Path
 
-LOG_FILE = "bot_debug.log"
+LOG_FILE = Path(__file__).resolve().parents[1] / "bot_debug.log"
 
 def setup_logger():
 	logger = logging.getLogger("attachmentbot")
@@ -17,20 +18,24 @@ def setup_logger():
 		"%Y-%m-%d %H:%M:%S"
 	)
 
-	file_handler = RotatingFileHandler(
-		LOG_FILE,
-		maxBytes=5_000_000,
-		backupCount=3,
-		encoding="utf-8"
-	)
-
 	console_handler = logging.StreamHandler(sys.stdout)
-
-	file_handler.setFormatter(fmt)
 	console_handler.setFormatter(fmt)
 
-	logger.addHandler(file_handler)
 	logger.addHandler(console_handler)
+
+	try:
+		LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+		LOG_FILE.touch(exist_ok=True)
+		file_handler = RotatingFileHandler(
+			LOG_FILE,
+			maxBytes=5_000_000,
+			backupCount=3,
+			encoding="utf-8"
+		)
+		file_handler.setFormatter(fmt)
+		logger.addHandler(file_handler)
+	except OSError as exc:
+		print(f"AttachmentBot could not open log file {LOG_FILE}: {exc}", file=sys.stderr)
 
 	logger.propagate = False
 

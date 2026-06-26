@@ -3,7 +3,7 @@ from discord.ext import commands
 import asyncio
 import os
 from pathlib import Path
-from core.logger import setup_logger
+from core.logger import LOG_FILE, setup_logger
 from config import TOKEN as CONFIG_TOKEN
 
 log = setup_logger()
@@ -31,6 +31,7 @@ def load_token():
 class AttachmentBot(commands.Bot):
 	def __init__(self):
 		super().__init__(command_prefix="!", intents=intents)
+		self.guild_command_sync_complete = False
 
 	async def setup_hook(self):
 		await self.load_extension("cogs.moderation")
@@ -48,5 +49,19 @@ bot = AttachmentBot()
 @bot.event
 async def on_ready():
 	log.info(f"Logged in as {bot.user}")
+	log.info(f"Log file: {LOG_FILE}")
+	log.info(f"Working directory: {Path.cwd()}")
+	if bot.guild_command_sync_complete:
+		return
+
+	for guild in bot.guilds:
+		try:
+			bot.tree.clear_commands(guild=guild)
+			synced = await bot.tree.sync(guild=guild)
+			log.info(f"Cleared guild-specific slash commands for guild {guild.id}; {len(synced)} remain")
+		except discord.DiscordException as exc:
+			log.info(f"Guild command sync failed for {guild.id}: {exc}")
+
+	bot.guild_command_sync_complete = True
 
 bot.run(load_token())
