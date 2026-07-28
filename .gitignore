@@ -2,6 +2,7 @@ __pycache__/
 *.py[cod]
 
 attachmentbot.sqlite3
+duplicate_detector.sqlite3
 live data/
 bot_debug.log*
 testbottoken.txt

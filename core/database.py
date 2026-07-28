@@ -132,10 +132,116 @@ class BotDatabase:
 				created_at INTEGER NOT NULL,
 				PRIMARY KEY (guild_id, user_id, role_id)
 			);
+
+			CREATE TABLE IF NOT EXISTS territory_settings (
+				guild_id INTEGER PRIMARY KEY,
+				enabled INTEGER NOT NULL DEFAULT 0,
+				update_interval_minutes INTEGER NOT NULL DEFAULT 60,
+				updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+				FOREIGN KEY (guild_id) REFERENCES guild_settings(guild_id) ON DELETE CASCADE
+			);
+
+			CREATE TABLE IF NOT EXISTS territory_channel_blacklist (
+				guild_id INTEGER NOT NULL,
+				channel_id INTEGER NOT NULL,
+				PRIMARY KEY (guild_id, channel_id),
+				FOREIGN KEY (guild_id) REFERENCES guild_settings(guild_id) ON DELETE CASCADE
+			);
+
+			CREATE TABLE IF NOT EXISTS territory_channel_state (
+				guild_id INTEGER NOT NULL,
+				channel_id INTEGER NOT NULL,
+				last_managed_line TEXT NOT NULL,
+				line_created INTEGER NOT NULL DEFAULT 0,
+				PRIMARY KEY (guild_id, channel_id),
+				FOREIGN KEY (guild_id) REFERENCES guild_settings(guild_id) ON DELETE CASCADE
+			);
+
+			CREATE TABLE IF NOT EXISTS recycle_settings (
+				guild_id INTEGER PRIMARY KEY,
+				enabled INTEGER NOT NULL DEFAULT 0,
+				channel_id INTEGER,
+				checkpoint_message_id INTEGER,
+				reply_fallback INTEGER NOT NULL DEFAULT 0,
+				ignore_replies INTEGER NOT NULL DEFAULT 0,
+				history_days INTEGER NOT NULL DEFAULT 30,
+				updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+				FOREIGN KEY (guild_id) REFERENCES guild_settings(guild_id) ON DELETE CASCADE
+			);
+
+			CREATE TABLE IF NOT EXISTS recycle_url_signatures (
+				guild_id INTEGER NOT NULL,
+				channel_id INTEGER NOT NULL,
+				signature TEXT NOT NULL,
+				first_message_id INTEGER NOT NULL,
+				PRIMARY KEY (guild_id, channel_id, signature)
+			);
+
+			CREATE TABLE IF NOT EXISTS recycle_image_hashes (
+				guild_id INTEGER NOT NULL,
+				channel_id INTEGER NOT NULL,
+				phash TEXT NOT NULL,
+				first_message_id INTEGER NOT NULL,
+				PRIMARY KEY (guild_id, channel_id, phash)
+			);
+
+			CREATE TABLE IF NOT EXISTS recycle_image_hash_buckets (
+				guild_id INTEGER NOT NULL,
+				channel_id INTEGER NOT NULL,
+				bucket_index INTEGER NOT NULL,
+				bucket_value TEXT NOT NULL,
+				phash TEXT NOT NULL,
+				PRIMARY KEY (guild_id, channel_id, bucket_index, bucket_value, phash)
+			);
+
+			CREATE INDEX IF NOT EXISTS recycle_image_hash_bucket_lookup
+			ON recycle_image_hash_buckets (
+				guild_id, channel_id, bucket_index, bucket_value
+			);
+
+			CREATE TABLE IF NOT EXISTS recycle_processed_messages (
+				guild_id INTEGER NOT NULL,
+				channel_id INTEGER NOT NULL,
+				message_id INTEGER NOT NULL,
+				PRIMARY KEY (guild_id, channel_id, message_id)
+			);
+
+			CREATE TABLE IF NOT EXISTS relay_settings (
+				guild_id INTEGER PRIMARY KEY,
+				enabled INTEGER NOT NULL DEFAULT 0,
+				updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+				FOREIGN KEY (guild_id) REFERENCES guild_settings(guild_id) ON DELETE CASCADE
+			);
+
+			CREATE TABLE IF NOT EXISTS relay_routes (
+				route_id INTEGER PRIMARY KEY AUTOINCREMENT,
+				guild_id INTEGER NOT NULL,
+				source_guild_id INTEGER NOT NULL,
+				source_channel_id INTEGER NOT NULL,
+				target_thread_id INTEGER NOT NULL,
+				created_by INTEGER NOT NULL,
+				created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+				UNIQUE (guild_id, source_channel_id, target_thread_id),
+				FOREIGN KEY (guild_id) REFERENCES guild_settings(guild_id) ON DELETE CASCADE
+			);
+
+			CREATE INDEX IF NOT EXISTS relay_route_source_lookup
+			ON relay_routes (source_channel_id);
+
+			CREATE TABLE IF NOT EXISTS relay_deliveries (
+				route_id INTEGER NOT NULL,
+				source_message_id INTEGER NOT NULL,
+				target_message_id INTEGER NOT NULL,
+				delivered_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+				PRIMARY KEY (route_id, source_message_id),
+				FOREIGN KEY (route_id) REFERENCES relay_routes(route_id) ON DELETE CASCADE
+			);
 			"""
 		)
 		self.add_missing_guild_columns()
 		self.add_missing_pressure_columns()
+		self.add_missing_territory_columns()
+		self.add_missing_recycle_columns()
 		self.conn.commit()
 
 	def add_missing_guild_columns(self):
@@ -163,6 +269,37 @@ class BotDatabase:
 		for column, definition in columns.items():
 			if column not in existing:
 				self.conn.execute(f"ALTER TABLE pressure_settings ADD COLUMN {column} {definition}")
+
+	def add_missing_territory_columns(self):
+		rows = self.conn.execute("PRAGMA table_info(territory_settings)").fetchall()
+		existing = {row["name"] for row in rows}
+		if "enabled" not in existing:
+			self.conn.execute(
+				"ALTER TABLE territory_settings ADD COLUMN enabled INTEGER NOT NULL DEFAULT 0"
+			)
+
+	def add_missing_recycle_columns(self):
+		rows = self.conn.execute("PRAGMA table_info(recycle_settings)").fetchall()
+		existing = {row["name"] for row in rows}
+		columns = {
+			"reply_fallback": "INTEGER NOT NULL DEFAULT 0",
+			"ignore_replies": "INTEGER NOT NULL DEFAULT 0",
+			"history_days": "INTEGER NOT NULL DEFAULT 30",
+		}
+		for column, definition in columns.items():
+			if column not in existing:
+				self.conn.execute(
+					f"ALTER TABLE recycle_settings ADD COLUMN {column} {definition}"
+				)
+		if "history_days" not in existing:
+			for table in (
+				"recycle_url_signatures",
+				"recycle_image_hashes",
+				"recycle_image_hash_buckets",
+				"recycle_processed_messages",
+			):
+				self.conn.execute(f"DELETE FROM {table}")
+			self.conn.execute("UPDATE recycle_settings SET checkpoint_message_id = NULL")
 
 	def get_metadata(self, key: str) -> Optional[str]:
 		row = self.conn.execute(
@@ -240,6 +377,18 @@ class BotDatabase:
 		created = result.rowcount > 0
 		self.conn.execute(
 			"INSERT OR IGNORE INTO pressure_settings (guild_id) VALUES (?)",
+			(guild_id,),
+		)
+		self.conn.execute(
+			"INSERT OR IGNORE INTO territory_settings (guild_id) VALUES (?)",
+			(guild_id,),
+		)
+		self.conn.execute(
+			"INSERT OR IGNORE INTO recycle_settings (guild_id) VALUES (?)",
+			(guild_id,),
+		)
+		self.conn.execute(
+			"INSERT OR IGNORE INTO relay_settings (guild_id) VALUES (?)",
 			(guild_id,),
 		)
 		if created and seed_defaults:
@@ -333,7 +482,385 @@ class BotDatabase:
 			"features": self.get_feature_flags(guild_id),
 			"manager_roles": self.get_manager_roles(guild_id),
 			"pressure": self.get_pressure_settings(guild_id),
+			"territory": self.get_territory_settings(guild_id),
+			"recycle": self.get_recycle_settings(guild_id),
+			"relay": self.get_relay_settings(guild_id),
 		}
+
+	def get_shared_settings(self, guild_id: int) -> Optional[dict]:
+		row = self.conn.execute(
+			"SELECT guild_id, log_channel_id, role_id FROM guild_settings WHERE guild_id = ?",
+			(guild_id,),
+		).fetchone()
+		if not row:
+			return None
+		return dict(row)
+
+	def get_ocr_settings(self, guild_id: int) -> Optional[dict]:
+		row = self.conn.execute(
+			"""
+			SELECT guild_id, enabled, log_channel_id, role_id, detection_threshold,
+			       single_image_max_messages, single_image_lookback_days
+			FROM guild_settings WHERE guild_id = ?
+			""",
+			(guild_id,),
+		).fetchone()
+		if not row:
+			return None
+		return {
+			**dict(row),
+			"enabled": bool(row["enabled"]),
+			"channel_blacklist": self.get_blacklisted_channels(guild_id),
+			"keywords": self.get_keywords(guild_id),
+			"features": self.get_feature_flags(guild_id),
+		}
+
+	def get_recycle_settings(self, guild_id: int) -> dict:
+		self.ensure_guild(guild_id)
+		row = self.conn.execute(
+			"""
+			SELECT enabled, channel_id, checkpoint_message_id, reply_fallback,
+				ignore_replies, history_days
+			FROM recycle_settings WHERE guild_id = ?
+			""",
+			(guild_id,),
+		).fetchone()
+		return {
+			"enabled": bool(row["enabled"]),
+			"channel_id": row["channel_id"],
+			"checkpoint_message_id": row["checkpoint_message_id"],
+			"reply_fallback": bool(row["reply_fallback"]),
+			"ignore_replies": bool(row["ignore_replies"]),
+			"history_days": row["history_days"],
+		}
+
+	def set_recycle_enabled(self, guild_id: int, enabled: bool):
+		self.ensure_guild(guild_id)
+		self.conn.execute(
+			"""
+			UPDATE recycle_settings
+			SET enabled = ?, updated_at = CURRENT_TIMESTAMP
+			WHERE guild_id = ?
+			""",
+			(int(bool(enabled)), guild_id),
+		)
+		self.conn.commit()
+
+	def set_recycle_reply_fallback(self, guild_id: int, enabled: bool):
+		self.ensure_guild(guild_id)
+		self.conn.execute(
+			"""
+			UPDATE recycle_settings
+			SET reply_fallback = ?, updated_at = CURRENT_TIMESTAMP
+			WHERE guild_id = ?
+			""",
+			(int(bool(enabled)), guild_id),
+		)
+		self.conn.commit()
+
+	def set_recycle_ignore_replies(self, guild_id: int, enabled: bool):
+		self.ensure_guild(guild_id)
+		self.conn.execute(
+			"""
+			UPDATE recycle_settings
+			SET ignore_replies = ?, updated_at = CURRENT_TIMESTAMP
+			WHERE guild_id = ?
+			""",
+			(int(bool(enabled)), guild_id),
+		)
+		self.conn.commit()
+
+	def clear_recycle_index(self, guild_id: int):
+		for table in (
+			"recycle_url_signatures",
+			"recycle_image_hashes",
+			"recycle_image_hash_buckets",
+			"recycle_processed_messages",
+		):
+			self.conn.execute(f"DELETE FROM {table} WHERE guild_id = ?", (guild_id,))
+
+	def set_recycle_history_days(self, guild_id: int, days: int) -> bool:
+		if days < 1:
+			raise ValueError("Recycle history must be at least one day.")
+		self.ensure_guild(guild_id)
+		if self.get_recycle_settings(guild_id)["history_days"] == days:
+			return False
+		self.clear_recycle_index(guild_id)
+		self.conn.execute(
+			"""
+			UPDATE recycle_settings
+			SET history_days = ?, checkpoint_message_id = NULL,
+				updated_at = CURRENT_TIMESTAMP
+			WHERE guild_id = ?
+			""",
+			(days, guild_id),
+		)
+		self.conn.commit()
+		return True
+
+	def set_recycle_channel(self, guild_id: int, channel_id: int):
+		self.ensure_guild(guild_id)
+		current = self.get_recycle_settings(guild_id)
+		if current["channel_id"] == channel_id:
+			return
+		self.clear_recycle_index(guild_id)
+		self.conn.execute(
+			"""
+			UPDATE recycle_settings
+			SET channel_id = ?, checkpoint_message_id = NULL,
+				updated_at = CURRENT_TIMESTAMP
+			WHERE guild_id = ?
+			""",
+			(channel_id, guild_id),
+		)
+		self.conn.commit()
+
+	def update_recycle_checkpoint(self, guild_id: int, message_id: int):
+		self.ensure_guild(guild_id)
+		self.conn.execute(
+			"""
+			UPDATE recycle_settings
+			SET checkpoint_message_id = CASE
+					WHEN checkpoint_message_id IS NULL OR checkpoint_message_id < ? THEN ?
+					ELSE checkpoint_message_id
+				END,
+				updated_at = CURRENT_TIMESTAMP
+			WHERE guild_id = ?
+			""",
+			(message_id, message_id, guild_id),
+		)
+		self.conn.commit()
+
+	def get_relay_settings(self, guild_id: int) -> dict:
+		self.ensure_guild(guild_id)
+		row = self.conn.execute(
+			"SELECT enabled FROM relay_settings WHERE guild_id = ?",
+			(guild_id,),
+		).fetchone()
+		return {
+			"enabled": bool(row["enabled"]),
+			"routes": self.get_relay_routes(guild_id),
+		}
+
+	def set_relay_enabled(self, guild_id: int, enabled: bool):
+		self.ensure_guild(guild_id)
+		self.conn.execute(
+			"""
+			UPDATE relay_settings
+			SET enabled = ?, updated_at = CURRENT_TIMESTAMP
+			WHERE guild_id = ?
+			""",
+			(int(bool(enabled)), guild_id),
+		)
+		self.conn.commit()
+
+	def get_relay_routes(self, guild_id: int) -> list[dict]:
+		rows = self.conn.execute(
+			"""
+			SELECT route_id, guild_id, source_guild_id, source_channel_id,
+				target_thread_id, created_by, created_at
+			FROM relay_routes
+			WHERE guild_id = ?
+			ORDER BY route_id
+			""",
+			(guild_id,),
+		).fetchall()
+		return [dict(row) for row in rows]
+
+	def get_active_relay_routes(self, source_channel_id: int) -> list[dict]:
+		rows = self.conn.execute(
+			"""
+			SELECT r.route_id, r.guild_id, r.source_guild_id, r.source_channel_id,
+				r.target_thread_id, r.created_by, r.created_at
+			FROM relay_routes r
+			JOIN relay_settings s ON s.guild_id = r.guild_id
+			WHERE r.source_channel_id = ? AND s.enabled = 1
+			ORDER BY r.route_id
+			""",
+			(source_channel_id,),
+		).fetchall()
+		return [dict(row) for row in rows]
+
+	def add_relay_route(
+		self,
+		guild_id: int,
+		source_guild_id: int,
+		source_channel_id: int,
+		target_thread_id: int,
+		created_by: int,
+	) -> int:
+		self.ensure_guild(guild_id)
+		try:
+			result = self.conn.execute(
+				"""
+				INSERT INTO relay_routes (
+					guild_id, source_guild_id, source_channel_id,
+					target_thread_id, created_by
+				) VALUES (?, ?, ?, ?, ?)
+				""",
+				(
+					guild_id, source_guild_id, source_channel_id,
+					target_thread_id, created_by,
+				),
+			)
+		except sqlite3.IntegrityError as exc:
+			raise ValueError("That relay route already exists.") from exc
+		self.conn.commit()
+		return result.lastrowid
+
+	def remove_relay_route(self, guild_id: int, route_id: int) -> bool:
+		result = self.conn.execute(
+			"DELETE FROM relay_routes WHERE guild_id = ? AND route_id = ?",
+			(guild_id, route_id),
+		)
+		self.conn.commit()
+		return result.rowcount > 0
+
+	def relay_delivery_exists(self, route_id: int, source_message_id: int) -> bool:
+		row = self.conn.execute(
+			"""
+			SELECT 1 FROM relay_deliveries
+			WHERE route_id = ? AND source_message_id = ?
+			""",
+			(route_id, source_message_id),
+		).fetchone()
+		return row is not None
+
+	def mark_relay_delivery(
+		self,
+		route_id: int,
+		source_message_id: int,
+		target_message_id: int,
+	):
+		self.conn.execute(
+			"""
+			INSERT OR IGNORE INTO relay_deliveries (
+				route_id, source_message_id, target_message_id
+			) VALUES (?, ?, ?)
+			""",
+			(route_id, source_message_id, target_message_id),
+		)
+		self.conn.commit()
+
+	def get_territory_settings(self, guild_id: int) -> dict:
+		self.ensure_guild(guild_id)
+		row = self.conn.execute(
+			"SELECT enabled, update_interval_minutes FROM territory_settings WHERE guild_id = ?",
+			(guild_id,),
+		).fetchone()
+		return {
+			"enabled": bool(row["enabled"]),
+			"update_interval_minutes": row["update_interval_minutes"],
+			"channel_blacklist": self.get_territory_blacklist(guild_id),
+		}
+
+	def set_territory_enabled(self, guild_id: int, enabled: bool):
+		self.ensure_guild(guild_id)
+		self.conn.execute(
+			"""
+			UPDATE territory_settings
+			SET enabled = ?, updated_at = CURRENT_TIMESTAMP
+			WHERE guild_id = ?
+			""",
+			(int(bool(enabled)), guild_id),
+		)
+		self.conn.commit()
+
+	def set_territory_update_interval(self, guild_id: int, minutes: int):
+		if minutes < 1:
+			raise ValueError("Territory update interval must be at least one minute.")
+		self.ensure_guild(guild_id)
+		self.conn.execute(
+			"""
+			UPDATE territory_settings
+			SET update_interval_minutes = ?, updated_at = CURRENT_TIMESTAMP
+			WHERE guild_id = ?
+			""",
+			(minutes, guild_id),
+		)
+		self.conn.commit()
+
+	def get_territory_blacklist(self, guild_id: int) -> set[int]:
+		rows = self.conn.execute(
+			"SELECT channel_id FROM territory_channel_blacklist WHERE guild_id = ?",
+			(guild_id,),
+		).fetchall()
+		return {row["channel_id"] for row in rows}
+
+	def add_territory_blacklist(self, guild_id: int, channel_id: int):
+		self.ensure_guild(guild_id)
+		self.conn.execute(
+			"INSERT OR IGNORE INTO territory_channel_blacklist (guild_id, channel_id) VALUES (?, ?)",
+			(guild_id, channel_id),
+		)
+		self.conn.commit()
+
+	def remove_territory_blacklist(self, guild_id: int, channel_id: int):
+		self.conn.execute(
+			"DELETE FROM territory_channel_blacklist WHERE guild_id = ? AND channel_id = ?",
+			(guild_id, channel_id),
+		)
+		self.conn.commit()
+
+	def get_territory_channel_state(self, guild_id: int, channel_id: int) -> Optional[dict]:
+		row = self.conn.execute(
+			"""
+			SELECT last_managed_line, line_created
+			FROM territory_channel_state
+			WHERE guild_id = ? AND channel_id = ?
+			""",
+			(guild_id, channel_id),
+		).fetchone()
+		if not row:
+			return None
+		return {
+			"last_managed_line": row["last_managed_line"],
+			"line_created": bool(row["line_created"]),
+		}
+
+	def get_territory_channel_states(self, guild_id: int) -> dict[int, dict]:
+		rows = self.conn.execute(
+			"""
+			SELECT channel_id, last_managed_line, line_created
+			FROM territory_channel_state WHERE guild_id = ?
+			""",
+			(guild_id,),
+		).fetchall()
+		return {
+			row["channel_id"]: {
+				"last_managed_line": row["last_managed_line"],
+				"line_created": bool(row["line_created"]),
+			}
+			for row in rows
+		}
+
+	def set_territory_channel_state(
+		self,
+		guild_id: int,
+		channel_id: int,
+		last_managed_line: str,
+		line_created: bool,
+	):
+		self.ensure_guild(guild_id)
+		self.conn.execute(
+			"""
+			INSERT INTO territory_channel_state (
+				guild_id, channel_id, last_managed_line, line_created
+			) VALUES (?, ?, ?, ?)
+			ON CONFLICT(guild_id, channel_id) DO UPDATE SET
+				last_managed_line = excluded.last_managed_line,
+				line_created = excluded.line_created
+			""",
+			(guild_id, channel_id, last_managed_line, int(bool(line_created))),
+		)
+		self.conn.commit()
+
+	def remove_territory_channel_state(self, guild_id: int, channel_id: int):
+		self.conn.execute(
+			"DELETE FROM territory_channel_state WHERE guild_id = ? AND channel_id = ?",
+			(guild_id, channel_id),
+		)
+		self.conn.commit()
 
 	def set_pressure_channel_threshold(self, guild_id: int, channel_id: int, threshold: int):
 		self.ensure_guild(guild_id)

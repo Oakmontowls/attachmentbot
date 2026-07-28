@@ -8,6 +8,9 @@ from config import TOKEN as CONFIG_TOKEN
 
 log = setup_logger()
 
+REQUIRED_EXTENSIONS = ("cogs.base", "cogs.activity")
+OPTIONAL_MODULES = ("ocr", "pressure", "territory", "recycle", "relay")
+
 intents = discord.Intents.default()
 intents.message_content = True
 intents.guilds = True
@@ -34,17 +37,37 @@ class AttachmentBot(commands.Bot):
 		self.guild_command_sync_complete = False
 
 	async def setup_hook(self):
-		await self.load_extension("cogs.moderation")
+		for extension in REQUIRED_EXTENSIONS:
+			await self.load_extension(extension)
+
+		configured_modules = os.getenv(
+			"ATTACHMENTBOT_MODULES", ",".join(OPTIONAL_MODULES)
+		)
+		requested_modules = {
+			name.strip().lower()
+			for name in configured_modules.split(",")
+			if name.strip()
+		}
+		for name in OPTIONAL_MODULES:
+			if name not in requested_modules:
+				log.info(f"Module disabled by configuration: {name}")
+				continue
+
+			extension = f"cogs.{name}"
+			try:
+				await self.load_extension(extension)
+			except commands.ExtensionError as exc:
+				log.error(f"Optional module failed to load ({name}): {exc}")
+
+		unknown_modules = requested_modules.difference(OPTIONAL_MODULES)
+		for name in sorted(unknown_modules):
+			log.error(f"Unknown module in ATTACHMENTBOT_MODULES: {name}")
+
 		synced = await self.tree.sync()
 		log.info(f"Synced {len(synced)} slash command(s)")
 
-		# start background worker
-		from core.queue_worker import start_worker
 		from core.temporary_roles import start_temporary_role_worker
-		from core.message_activity import message_activity
-		asyncio.create_task(start_worker(self))
 		asyncio.create_task(start_temporary_role_worker(self))
-		asyncio.create_task(message_activity.initialize(self))
 
 bot = AttachmentBot()
 
