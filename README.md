@@ -69,6 +69,14 @@ AttachmentBot is a Discord moderation bot focused on detecting image-based scam 
 - Supports multiple source-to-thread routes per destination server and is disabled by default.
 - Relays only messages received after a route is configured; it does not backfill channel history.
 
+### Automatic responses
+
+- Sends configurable responses when a message contains a literal trigger, matches a regular expression, or contains a configured Discord sticker ID.
+- Supports multiple triggers for one response, a per-trigger response chance from 0 through 1, and persistent cooldowns in seconds.
+- Can respond even when another moderation module deletes the triggering message.
+- Prevents configured responses from creating user, role, or everyone mentions.
+- Is disabled by default and can be removed independently of the other feature modules.
+
 ## Slash commands
 
 All commands begin with `/ab`.
@@ -82,21 +90,22 @@ All commands begin with `/ab`.
 - `/ab territory` contains manager-only territory-description settings.
 - `/ab recycle` enables duplicate detection and selects its monitored channel.
 - `/ab relay` enables news relaying and manages source-to-forum-thread routes.
+- `/ab respond` enables automatic responses and manages text, regex, and sticker-ID triggers with configurable chances and cooldowns.
 
 Configuration commands require either the Discord Administrator permission or a manager role configured by an administrator.
 
 ## Optional modules
 
-OCR, pressure, territory, recycle, and relay are independent optional cogs. They share database, permission, activity-cache, and temporary-role services from `core/`, but none imports or requires another feature cog.
+OCR, pressure, territory, recycle, relay, and respond are independent optional cogs. They share database, permission, activity-cache, and temporary-role services from `core/`, but none imports or requires another feature cog.
 
-All five modules load by default. Set `ATTACHMENTBOT_MODULES` to a comma-separated subset to run only selected features:
+All six modules load by default. Set `ATTACHMENTBOT_MODULES` to a comma-separated subset to run only selected features:
 
 ```powershell
 $env:ATTACHMENTBOT_MODULES="ocr,pressure"
 python main.py
 ```
 
-The available names are `ocr`, `pressure`, `territory`, `recycle`, and `relay`. A module omitted from this setting is not loaded and its `/ab` command group is not registered. Optional-module load failures are logged without stopping the other modules. The shared `base` and `activity` cogs remain loaded because they provide `/ab`, permissions, and the rolling message cache.
+The available names are `ocr`, `pressure`, `territory`, `recycle`, `relay`, and `respond`. A module omitted from this setting is not loaded and its `/ab` command group is not registered. Optional-module load failures are logged without stopping the other modules. The shared `base` and `activity` cogs remain loaded because they provide `/ab`, permissions, and the rolling message cache.
 
 ### Configuring a news relay
 

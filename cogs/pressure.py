@@ -92,7 +92,7 @@ class PressureCog(
 		new_member_hours="Hours after joining where new-member pressure applies.",
 		delete_message="Delete messages posted while the user is over the threshold.",
 		give_role="Give the configured timeout role.",
-		role_duration_minutes="Minutes before the timeout role is removed. Use 0 for permanent.",
+		role_duration_seconds="Seconds before the timeout role is removed. Use 0 for permanent.",
 		log_channel="Channel for pressure moderation logs.",
 		channel="Channel for a threshold override. Omit channel_threshold to remove it.",
 		channel_threshold="Whole-number override threshold for the selected channel.",
@@ -117,7 +117,7 @@ class PressureCog(
 		new_member_hours: app_commands.Range[int, 0, 8760] | None = None,
 		delete_message: bool | None = None,
 		give_role: bool | None = None,
-		role_duration_minutes: app_commands.Range[int, 0, 10080] | None = None,
+		role_duration_seconds: app_commands.Range[int, 0, 604800] | None = None,
 		log_channel: discord.TextChannel | None = None,
 		channel: discord.TextChannel | discord.ForumChannel | None = None,
 		channel_threshold: app_commands.Range[int, 1, 10000] | None = None,
@@ -142,7 +142,7 @@ class PressureCog(
 			"new_member_hours": new_member_hours,
 			"delete_message": delete_message,
 			"give_role": give_role,
-			"role_duration_seconds": role_duration_minutes * 60 if role_duration_minutes is not None else None,
+			"role_duration_seconds": role_duration_seconds,
 		}
 		updates = {key: value for key, value in updates.items() if value is not None}
 		changes = []

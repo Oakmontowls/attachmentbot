@@ -236,6 +236,52 @@ class BotDatabase:
 				PRIMARY KEY (route_id, source_message_id),
 				FOREIGN KEY (route_id) REFERENCES relay_routes(route_id) ON DELETE CASCADE
 			);
+
+			CREATE TABLE IF NOT EXISTS respond_settings (
+				guild_id INTEGER PRIMARY KEY,
+				enabled INTEGER NOT NULL DEFAULT 0,
+				updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+				FOREIGN KEY (guild_id) REFERENCES guild_settings(guild_id) ON DELETE CASCADE
+			);
+
+			CREATE TABLE IF NOT EXISTS auto_responses (
+				response_id INTEGER PRIMARY KEY AUTOINCREMENT,
+				guild_id INTEGER NOT NULL,
+				response_text TEXT NOT NULL,
+				created_by INTEGER NOT NULL,
+				created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+				FOREIGN KEY (guild_id) REFERENCES guild_settings(guild_id) ON DELETE CASCADE
+			);
+
+			CREATE INDEX IF NOT EXISTS auto_response_guild_lookup
+			ON auto_responses (guild_id);
+
+			CREATE TABLE IF NOT EXISTS auto_response_triggers (
+				trigger_id INTEGER PRIMARY KEY AUTOINCREMENT,
+				response_id INTEGER NOT NULL,
+				trigger_text TEXT NOT NULL,
+				is_regex INTEGER NOT NULL DEFAULT 0,
+				response_chance REAL NOT NULL DEFAULT 1.0
+					CHECK (response_chance >= 0.0 AND response_chance <= 1.0),
+				cooldown_seconds INTEGER NOT NULL DEFAULT 0 CHECK (cooldown_seconds >= 0),
+				last_responded_at REAL,
+				created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+				UNIQUE (response_id, trigger_text, is_regex),
+				FOREIGN KEY (response_id) REFERENCES auto_responses(response_id) ON DELETE CASCADE
+			);
+
+			CREATE TABLE IF NOT EXISTS auto_response_sticker_triggers (
+				sticker_trigger_id INTEGER PRIMARY KEY AUTOINCREMENT,
+				response_id INTEGER NOT NULL,
+				sticker_id INTEGER NOT NULL,
+				response_chance REAL NOT NULL DEFAULT 1.0
+					CHECK (response_chance >= 0.0 AND response_chance <= 1.0),
+				cooldown_seconds INTEGER NOT NULL DEFAULT 0 CHECK (cooldown_seconds >= 0),
+				last_responded_at REAL,
+				created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+				UNIQUE (response_id, sticker_id),
+				FOREIGN KEY (response_id) REFERENCES auto_responses(response_id) ON DELETE CASCADE
+			);
 			"""
 		)
 		self.add_missing_guild_columns()
@@ -391,6 +437,10 @@ class BotDatabase:
 			"INSERT OR IGNORE INTO relay_settings (guild_id) VALUES (?)",
 			(guild_id,),
 		)
+		self.conn.execute(
+			"INSERT OR IGNORE INTO respond_settings (guild_id) VALUES (?)",
+			(guild_id,),
+		)
 		if created and seed_defaults:
 			self.seed_default_guild(guild_id)
 		self.conn.commit()
@@ -485,6 +535,7 @@ class BotDatabase:
 			"territory": self.get_territory_settings(guild_id),
 			"recycle": self.get_recycle_settings(guild_id),
 			"relay": self.get_relay_settings(guild_id),
+			"respond": self.get_respond_settings(guild_id),
 		}
 
 	def get_shared_settings(self, guild_id: int) -> Optional[dict]:
@@ -741,6 +792,316 @@ class BotDatabase:
 			(route_id, source_message_id, target_message_id),
 		)
 		self.conn.commit()
+
+	def get_respond_settings(self, guild_id: int) -> dict:
+		self.ensure_guild(guild_id)
+		row = self.conn.execute(
+			"SELECT enabled FROM respond_settings WHERE guild_id = ?",
+			(guild_id,),
+		).fetchone()
+		return {
+			"enabled": bool(row["enabled"]),
+			"responses": self.get_auto_responses(guild_id),
+		}
+
+	def set_respond_enabled(self, guild_id: int, enabled: bool):
+		self.ensure_guild(guild_id)
+		self.conn.execute(
+			"""
+			UPDATE respond_settings
+			SET enabled = ?, updated_at = CURRENT_TIMESTAMP
+			WHERE guild_id = ?
+			""",
+			(int(bool(enabled)), guild_id),
+		)
+		self.conn.commit()
+
+	def add_auto_response(self, guild_id: int, response_text: str, created_by: int) -> int:
+		self.ensure_guild(guild_id)
+		result = self.conn.execute(
+			"""
+			INSERT INTO auto_responses (guild_id, response_text, created_by)
+			VALUES (?, ?, ?)
+			""",
+			(guild_id, response_text, created_by),
+		)
+		self.conn.commit()
+		return result.lastrowid
+
+	def update_auto_response(self, guild_id: int, response_id: int, response_text: str) -> bool:
+		result = self.conn.execute(
+			"""
+			UPDATE auto_responses SET response_text = ?
+			WHERE guild_id = ? AND response_id = ?
+			""",
+			(response_text, guild_id, response_id),
+		)
+		self.conn.commit()
+		return result.rowcount > 0
+
+	def remove_auto_response(self, guild_id: int, response_id: int) -> bool:
+		result = self.conn.execute(
+			"DELETE FROM auto_responses WHERE guild_id = ? AND response_id = ?",
+			(guild_id, response_id),
+		)
+		self.conn.commit()
+		return result.rowcount > 0
+
+	def get_auto_responses(self, guild_id: int) -> list[dict]:
+		response_rows = self.conn.execute(
+			"""
+			SELECT response_id, response_text, created_by, created_at
+			FROM auto_responses WHERE guild_id = ? ORDER BY response_id
+			""",
+			(guild_id,),
+		).fetchall()
+		responses = []
+		for row in response_rows:
+			response = dict(row)
+			trigger_rows = self.conn.execute(
+				"""
+				SELECT trigger_id, trigger_text, is_regex, response_chance,
+					cooldown_seconds, last_responded_at
+				FROM auto_response_triggers
+				WHERE response_id = ? ORDER BY trigger_id
+				""",
+				(row["response_id"],),
+			).fetchall()
+			response["triggers"] = [
+				{
+					**dict(trigger),
+					"is_regex": bool(trigger["is_regex"]),
+				}
+				for trigger in trigger_rows
+			]
+			sticker_rows = self.conn.execute(
+				"""
+				SELECT sticker_trigger_id, sticker_id, response_chance,
+					cooldown_seconds, last_responded_at
+				FROM auto_response_sticker_triggers
+				WHERE response_id = ? ORDER BY sticker_trigger_id
+				""",
+				(row["response_id"],),
+			).fetchall()
+			response["sticker_triggers"] = [dict(trigger) for trigger in sticker_rows]
+			responses.append(response)
+		return responses
+
+	def add_auto_response_trigger(
+		self,
+		guild_id: int,
+		response_id: int,
+		trigger_text: str,
+		is_regex: bool,
+		response_chance: float,
+		cooldown_seconds: int,
+	) -> int:
+		response = self.conn.execute(
+			"SELECT 1 FROM auto_responses WHERE guild_id = ? AND response_id = ?",
+			(guild_id, response_id),
+		).fetchone()
+		if not response:
+			raise ValueError("That response does not exist in this server.")
+		try:
+			result = self.conn.execute(
+				"""
+				INSERT INTO auto_response_triggers (
+					response_id, trigger_text, is_regex,
+					response_chance, cooldown_seconds
+				) VALUES (?, ?, ?, ?, ?)
+				""",
+				(
+					response_id, trigger_text, int(bool(is_regex)),
+					response_chance, cooldown_seconds,
+				),
+			)
+		except sqlite3.IntegrityError as exc:
+			raise ValueError("That trigger is already assigned to this response.") from exc
+		self.conn.commit()
+		return result.lastrowid
+
+	def update_auto_response_trigger(
+		self,
+		guild_id: int,
+		trigger_id: int,
+		**values,
+	) -> bool:
+		allowed = {"trigger_text", "is_regex", "response_chance", "cooldown_seconds"}
+		updates = {key: value for key, value in values.items() if key in allowed and value is not None}
+		if not updates:
+			return False
+		if "is_regex" in updates:
+			updates["is_regex"] = int(bool(updates["is_regex"]))
+		assignments = ", ".join(f"{key} = ?" for key in updates)
+		try:
+			result = self.conn.execute(
+				f"""
+				UPDATE auto_response_triggers SET {assignments}
+				WHERE trigger_id = ? AND response_id IN (
+					SELECT response_id FROM auto_responses WHERE guild_id = ?
+				)
+				""",
+				[*updates.values(), trigger_id, guild_id],
+			)
+		except sqlite3.IntegrityError as exc:
+			raise ValueError("That trigger is already assigned to this response.") from exc
+		self.conn.commit()
+		return result.rowcount > 0
+
+	def remove_auto_response_trigger(self, guild_id: int, trigger_id: int) -> bool:
+		result = self.conn.execute(
+			"""
+			DELETE FROM auto_response_triggers
+			WHERE trigger_id = ? AND response_id IN (
+				SELECT response_id FROM auto_responses WHERE guild_id = ?
+			)
+			""",
+			(trigger_id, guild_id),
+		)
+		self.conn.commit()
+		return result.rowcount > 0
+
+	def get_active_response_triggers(self, guild_id: int) -> list[dict]:
+		rows = self.conn.execute(
+			"""
+			SELECT t.trigger_id, t.trigger_text, t.is_regex, t.response_chance,
+				t.cooldown_seconds, t.last_responded_at,
+				r.response_id, r.response_text
+			FROM auto_response_triggers t
+			JOIN auto_responses r ON r.response_id = t.response_id
+			JOIN respond_settings s ON s.guild_id = r.guild_id
+			WHERE r.guild_id = ? AND s.enabled = 1
+			ORDER BY t.trigger_id
+			""",
+			(guild_id,),
+		).fetchall()
+		return [
+			{**dict(row), "is_regex": bool(row["is_regex"])}
+			for row in rows
+		]
+
+	def claim_auto_response_trigger(self, trigger_id: int, responded_at: float) -> bool:
+		result = self.conn.execute(
+			"""
+			UPDATE auto_response_triggers
+			SET last_responded_at = ?
+			WHERE trigger_id = ?
+				AND (
+					last_responded_at IS NULL
+					OR last_responded_at <= ? - cooldown_seconds
+				)
+			""",
+			(responded_at, trigger_id, responded_at),
+		)
+		self.conn.commit()
+		return result.rowcount > 0
+
+	def add_auto_response_sticker_trigger(
+		self,
+		guild_id: int,
+		response_id: int,
+		sticker_id: int,
+		response_chance: float,
+		cooldown_seconds: int,
+	) -> int:
+		response = self.conn.execute(
+			"SELECT 1 FROM auto_responses WHERE guild_id = ? AND response_id = ?",
+			(guild_id, response_id),
+		).fetchone()
+		if not response:
+			raise ValueError("That response does not exist in this server.")
+		try:
+			result = self.conn.execute(
+				"""
+				INSERT INTO auto_response_sticker_triggers (
+					response_id, sticker_id, response_chance, cooldown_seconds
+				) VALUES (?, ?, ?, ?)
+				""",
+				(response_id, sticker_id, response_chance, cooldown_seconds),
+			)
+		except sqlite3.IntegrityError as exc:
+			raise ValueError("That sticker is already assigned to this response.") from exc
+		self.conn.commit()
+		return result.lastrowid
+
+	def update_auto_response_sticker_trigger(
+		self,
+		guild_id: int,
+		sticker_trigger_id: int,
+		**values,
+	) -> bool:
+		allowed = {"sticker_id", "response_chance", "cooldown_seconds"}
+		updates = {key: value for key, value in values.items() if key in allowed and value is not None}
+		if not updates:
+			return False
+		assignments = ", ".join(f"{key} = ?" for key in updates)
+		try:
+			result = self.conn.execute(
+				f"""
+				UPDATE auto_response_sticker_triggers SET {assignments}
+				WHERE sticker_trigger_id = ? AND response_id IN (
+					SELECT response_id FROM auto_responses WHERE guild_id = ?
+				)
+				""",
+				[*updates.values(), sticker_trigger_id, guild_id],
+			)
+		except sqlite3.IntegrityError as exc:
+			raise ValueError("That sticker is already assigned to this response.") from exc
+		self.conn.commit()
+		return result.rowcount > 0
+
+	def remove_auto_response_sticker_trigger(
+		self,
+		guild_id: int,
+		sticker_trigger_id: int,
+	) -> bool:
+		result = self.conn.execute(
+			"""
+			DELETE FROM auto_response_sticker_triggers
+			WHERE sticker_trigger_id = ? AND response_id IN (
+				SELECT response_id FROM auto_responses WHERE guild_id = ?
+			)
+			""",
+			(sticker_trigger_id, guild_id),
+		)
+		self.conn.commit()
+		return result.rowcount > 0
+
+	def get_active_response_sticker_triggers(self, guild_id: int) -> list[dict]:
+		rows = self.conn.execute(
+			"""
+			SELECT t.sticker_trigger_id, t.sticker_id, t.response_chance,
+				t.cooldown_seconds, t.last_responded_at,
+				r.response_id, r.response_text
+			FROM auto_response_sticker_triggers t
+			JOIN auto_responses r ON r.response_id = t.response_id
+			JOIN respond_settings s ON s.guild_id = r.guild_id
+			WHERE r.guild_id = ? AND s.enabled = 1
+			ORDER BY t.sticker_trigger_id
+			""",
+			(guild_id,),
+		).fetchall()
+		return [dict(row) for row in rows]
+
+	def claim_auto_response_sticker_trigger(
+		self,
+		sticker_trigger_id: int,
+		responded_at: float,
+	) -> bool:
+		result = self.conn.execute(
+			"""
+			UPDATE auto_response_sticker_triggers
+			SET last_responded_at = ?
+			WHERE sticker_trigger_id = ?
+				AND (
+					last_responded_at IS NULL
+					OR last_responded_at <= ? - cooldown_seconds
+				)
+			""",
+			(responded_at, sticker_trigger_id, responded_at),
+		)
+		self.conn.commit()
+		return result.rowcount > 0
 
 	def get_territory_settings(self, guild_id: int) -> dict:
 		self.ensure_guild(guild_id)

@@ -88,6 +88,18 @@ class AttachmentBotBaseCog(
 				inline=False,
 			)
 
+		if self.bot.get_cog("RespondCog"):
+			loaded.append("Respond")
+			respond = config["respond"]
+			embed.add_field(
+				name="Automatic Responses",
+				value=(
+					f"Enabled: {respond['enabled']}\n"
+					f"Configured responses: {len(respond['responses'])}"
+				),
+				inline=False,
+			)
+
 		embed.add_field(name="Loaded Modules", value=", ".join(loaded) or "None", inline=False)
 		await interaction.response.send_message(embed=embed, ephemeral=True)
 

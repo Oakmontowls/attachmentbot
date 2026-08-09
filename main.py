@@ -9,7 +9,7 @@ from config import TOKEN as CONFIG_TOKEN
 log = setup_logger()
 
 REQUIRED_EXTENSIONS = ("cogs.base", "cogs.activity")
-OPTIONAL_MODULES = ("ocr", "pressure", "territory", "recycle", "relay")
+OPTIONAL_MODULES = ("ocr", "pressure", "territory", "recycle", "relay", "respond")
 
 intents = discord.Intents.default()
 intents.message_content = True
