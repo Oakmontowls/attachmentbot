@@ -17,6 +17,9 @@ DB_PATH = Path("attachmentbot.sqlite3")
 
 FEATURE_OCR_GIVE_ROLE = "ocr_give_role"
 FEATURE_OCR_DELETE_MESSAGE = "ocr_delete_message"
+MODERATION_PERMISSION_OCR_REVIEW = "ocr_review"
+MODERATION_PERMISSION_NAMELESS = "nameless"
+DEFAULT_MODERATION_PERMISSION_LEVEL = 1
 
 class BotDatabase:
 	def __init__(self, path: Path = DB_PATH):
@@ -35,6 +38,8 @@ class BotDatabase:
 				enabled INTEGER NOT NULL DEFAULT 0,
 				log_channel_id INTEGER,
 				role_id INTEGER,
+				moderator_role_id INTEGER,
+				timeout_log_channel_id INTEGER,
 				detection_threshold INTEGER NOT NULL DEFAULT 10,
 				created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
 				updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -44,6 +49,22 @@ class BotDatabase:
 				guild_id INTEGER NOT NULL,
 				role_id INTEGER NOT NULL,
 				PRIMARY KEY (guild_id, role_id),
+				FOREIGN KEY (guild_id) REFERENCES guild_settings(guild_id) ON DELETE CASCADE
+			);
+
+			CREATE TABLE IF NOT EXISTS moderator_roles (
+				guild_id INTEGER NOT NULL,
+				role_id INTEGER NOT NULL,
+				permission_level INTEGER NOT NULL CHECK (permission_level >= 1),
+				PRIMARY KEY (guild_id, role_id),
+				FOREIGN KEY (guild_id) REFERENCES guild_settings(guild_id) ON DELETE CASCADE
+			);
+
+			CREATE TABLE IF NOT EXISTS moderation_permission_levels (
+				guild_id INTEGER NOT NULL,
+				feature TEXT NOT NULL,
+				permission_level INTEGER NOT NULL DEFAULT 1 CHECK (permission_level >= 1),
+				PRIMARY KEY (guild_id, feature),
 				FOREIGN KEY (guild_id) REFERENCES guild_settings(guild_id) ON DELETE CASCADE
 			);
 
@@ -76,6 +97,34 @@ class BotDatabase:
 				feature TEXT NOT NULL,
 				enabled INTEGER NOT NULL DEFAULT 0,
 				PRIMARY KEY (guild_id, feature),
+				FOREIGN KEY (guild_id) REFERENCES guild_settings(guild_id) ON DELETE CASCADE
+			);
+
+			CREATE TABLE IF NOT EXISTS ocr_moderation_settings (
+				guild_id INTEGER PRIMARY KEY,
+				review_enabled INTEGER NOT NULL DEFAULT 0,
+				review_channel_id INTEGER,
+				automatic_action TEXT NOT NULL DEFAULT 'none'
+					CHECK (automatic_action IN ('none', 'ban', 'kick_with_message')),
+				direct_message TEXT,
+				updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+				FOREIGN KEY (guild_id) REFERENCES guild_settings(guild_id) ON DELETE CASCADE
+			);
+
+			CREATE TABLE IF NOT EXISTS ocr_moderation_reviews (
+				review_id INTEGER PRIMARY KEY AUTOINCREMENT,
+				guild_id INTEGER NOT NULL,
+				target_user_id INTEGER NOT NULL,
+				source_message_id INTEGER NOT NULL,
+				source_channel_id INTEGER NOT NULL,
+				review_message_id INTEGER NOT NULL UNIQUE,
+				review_channel_id INTEGER NOT NULL,
+				status TEXT NOT NULL DEFAULT 'pending',
+				action TEXT,
+				acted_by INTEGER,
+				created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+				acted_at TEXT,
+				UNIQUE (guild_id, source_message_id),
 				FOREIGN KEY (guild_id) REFERENCES guild_settings(guild_id) ON DELETE CASCADE
 			);
 
@@ -285,6 +334,10 @@ class BotDatabase:
 			"""
 		)
 		self.add_missing_guild_columns()
+		self.migrate_ocr_review_role()
+		self.migrate_moderator_roles()
+		self.seed_moderation_permission_levels()
+		self.prepare_ocr_review_deduplication()
 		self.add_missing_pressure_columns()
 		self.add_missing_territory_columns()
 		self.add_missing_recycle_columns()
@@ -296,10 +349,85 @@ class BotDatabase:
 		columns = {
 			"single_image_max_messages": "INTEGER NOT NULL DEFAULT 0",
 			"single_image_lookback_days": "INTEGER NOT NULL DEFAULT 7",
+			"moderator_role_id": "INTEGER",
+			"timeout_log_channel_id": "INTEGER",
 		}
 		for column, definition in columns.items():
 			if column not in existing:
 				self.conn.execute(f"ALTER TABLE guild_settings ADD COLUMN {column} {definition}")
+
+	def migrate_ocr_review_role(self):
+		rows = self.conn.execute("PRAGMA table_info(ocr_moderation_settings)").fetchall()
+		if "review_role_id" not in {row["name"] for row in rows}:
+			return
+		self.conn.execute(
+			"""
+			UPDATE guild_settings
+			SET moderator_role_id = (
+				SELECT review_role_id FROM ocr_moderation_settings
+				WHERE ocr_moderation_settings.guild_id = guild_settings.guild_id
+			)
+			WHERE moderator_role_id IS NULL
+				AND EXISTS (
+					SELECT 1 FROM ocr_moderation_settings
+					WHERE ocr_moderation_settings.guild_id = guild_settings.guild_id
+						AND review_role_id IS NOT NULL
+				)
+			"""
+		)
+		self.conn.execute(
+			"UPDATE ocr_moderation_settings SET review_role_id = NULL"
+		)
+
+	def migrate_moderator_roles(self):
+		self.conn.execute(
+			"""
+			INSERT OR IGNORE INTO moderator_roles (guild_id, role_id, permission_level)
+			SELECT guild_id, moderator_role_id, 1
+			FROM guild_settings
+			WHERE moderator_role_id IS NOT NULL
+			"""
+		)
+		self.conn.execute(
+			"UPDATE guild_settings SET moderator_role_id = NULL"
+		)
+
+	def seed_moderation_permission_levels(self):
+		for feature in (
+			MODERATION_PERMISSION_OCR_REVIEW,
+			MODERATION_PERMISSION_NAMELESS,
+		):
+			self.conn.execute(
+				"""
+				INSERT OR IGNORE INTO moderation_permission_levels (
+					guild_id, feature, permission_level
+				)
+				SELECT guild_id, ?, ? FROM guild_settings
+				""",
+				(feature, DEFAULT_MODERATION_PERMISSION_LEVEL),
+			)
+
+	def prepare_ocr_review_deduplication(self):
+		self.conn.execute(
+			"""
+			UPDATE ocr_moderation_reviews
+			SET status = 'superseded', action = 'deduplicated'
+			WHERE status = 'pending'
+				AND review_id NOT IN (
+					SELECT MIN(review_id)
+					FROM ocr_moderation_reviews
+					WHERE status = 'pending'
+					GROUP BY guild_id, target_user_id
+				)
+			"""
+		)
+		self.conn.execute(
+			"""
+			CREATE UNIQUE INDEX IF NOT EXISTS ocr_pending_review_per_user
+			ON ocr_moderation_reviews (guild_id, target_user_id)
+			WHERE status = 'pending'
+			"""
+		)
 
 	def add_missing_pressure_columns(self):
 		rows = self.conn.execute("PRAGMA table_info(pressure_settings)").fetchall()
@@ -441,6 +569,22 @@ class BotDatabase:
 			"INSERT OR IGNORE INTO respond_settings (guild_id) VALUES (?)",
 			(guild_id,),
 		)
+		self.conn.execute(
+			"INSERT OR IGNORE INTO ocr_moderation_settings (guild_id) VALUES (?)",
+			(guild_id,),
+		)
+		for feature in (
+			MODERATION_PERMISSION_OCR_REVIEW,
+			MODERATION_PERMISSION_NAMELESS,
+		):
+			self.conn.execute(
+				"""
+				INSERT OR IGNORE INTO moderation_permission_levels (
+					guild_id, feature, permission_level
+				) VALUES (?, ?, ?)
+				""",
+				(guild_id, feature, DEFAULT_MODERATION_PERMISSION_LEVEL),
+			)
 		if created and seed_defaults:
 			self.seed_default_guild(guild_id)
 		self.conn.commit()
@@ -491,6 +635,7 @@ class BotDatabase:
 			"enabled",
 			"log_channel_id",
 			"role_id",
+			"timeout_log_channel_id",
 			"detection_threshold",
 			"single_image_max_messages",
 			"single_image_lookback_days",
@@ -524,13 +669,17 @@ class BotDatabase:
 			"enabled": bool(row["enabled"]),
 			"log_channel_id": row["log_channel_id"],
 			"role_id": row["role_id"],
+			"timeout_log_channel_id": row["timeout_log_channel_id"],
 			"detection_threshold": row["detection_threshold"],
 			"single_image_max_messages": row["single_image_max_messages"],
 			"single_image_lookback_days": row["single_image_lookback_days"],
 			"channel_blacklist": self.get_blacklisted_channels(guild_id),
 			"keywords": self.get_keywords(guild_id),
 			"features": self.get_feature_flags(guild_id),
+			"ocr_moderation": self.get_ocr_moderation_settings(guild_id),
 			"manager_roles": self.get_manager_roles(guild_id),
+			"moderator_roles": self.get_moderator_roles(guild_id),
+			"moderation_permission_levels": self.get_moderation_permission_levels(guild_id),
 			"pressure": self.get_pressure_settings(guild_id),
 			"territory": self.get_territory_settings(guild_id),
 			"recycle": self.get_recycle_settings(guild_id),
@@ -540,7 +689,9 @@ class BotDatabase:
 
 	def get_shared_settings(self, guild_id: int) -> Optional[dict]:
 		row = self.conn.execute(
-			"SELECT guild_id, log_channel_id, role_id FROM guild_settings WHERE guild_id = ?",
+			"SELECT guild_id, log_channel_id, role_id, "
+			"timeout_log_channel_id "
+			"FROM guild_settings WHERE guild_id = ?",
 			(guild_id,),
 		).fetchone()
 		if not row:
@@ -564,7 +715,131 @@ class BotDatabase:
 			"channel_blacklist": self.get_blacklisted_channels(guild_id),
 			"keywords": self.get_keywords(guild_id),
 			"features": self.get_feature_flags(guild_id),
+			"moderation": self.get_ocr_moderation_settings(guild_id),
 		}
+
+	def get_ocr_moderation_settings(self, guild_id: int) -> dict:
+		self.ensure_guild(guild_id)
+		row = self.conn.execute(
+			"""
+			SELECT review_enabled, review_channel_id,
+				automatic_action, direct_message
+			FROM ocr_moderation_settings WHERE guild_id = ?
+			""",
+			(guild_id,),
+		).fetchone()
+		return {
+			"review_enabled": bool(row["review_enabled"]),
+			"review_channel_id": row["review_channel_id"],
+			"automatic_action": row["automatic_action"],
+			"direct_message": row["direct_message"],
+		}
+
+	def update_ocr_moderation_settings(self, guild_id: int, **values):
+		self.ensure_guild(guild_id)
+		allowed = {
+			"review_enabled",
+			"review_channel_id",
+			"automatic_action",
+			"direct_message",
+		}
+		updates = {key: value for key, value in values.items() if key in allowed}
+		if not updates:
+			return
+		if "review_enabled" in updates:
+			updates["review_enabled"] = int(bool(updates["review_enabled"]))
+		if "automatic_action" in updates and updates["automatic_action"] not in {
+			"none", "ban", "kick_with_message",
+		}:
+			raise ValueError("Unknown OCR automatic moderation action.")
+		assignments = ", ".join(f"{key} = ?" for key in updates)
+		self.conn.execute(
+			f"""
+			UPDATE ocr_moderation_settings
+			SET {assignments}, updated_at = CURRENT_TIMESTAMP
+			WHERE guild_id = ?
+			""",
+			[*updates.values(), guild_id],
+		)
+		self.conn.commit()
+
+	def create_ocr_moderation_review(
+		self,
+		guild_id: int,
+		target_user_id: int,
+		source_message_id: int,
+		source_channel_id: int,
+		review_message_id: int,
+		review_channel_id: int,
+	) -> int:
+		result = self.conn.execute(
+			"""
+			INSERT INTO ocr_moderation_reviews (
+				guild_id, target_user_id, source_message_id, source_channel_id,
+				review_message_id, review_channel_id
+			) VALUES (?, ?, ?, ?, ?, ?)
+			ON CONFLICT(guild_id, source_message_id) DO UPDATE SET
+				target_user_id = excluded.target_user_id,
+				source_channel_id = excluded.source_channel_id,
+				review_message_id = excluded.review_message_id,
+				review_channel_id = excluded.review_channel_id,
+				status = 'pending', action = NULL, acted_by = NULL, acted_at = NULL
+			""",
+			(
+				guild_id, target_user_id, source_message_id, source_channel_id,
+				review_message_id, review_channel_id,
+			),
+		)
+		self.conn.commit()
+		return result.lastrowid
+
+	def get_ocr_moderation_review(self, review_message_id: int) -> Optional[dict]:
+		row = self.conn.execute(
+			"""
+			SELECT review_id, guild_id, target_user_id, source_message_id,
+				source_channel_id, review_message_id, review_channel_id,
+				status, action, acted_by, created_at, acted_at
+			FROM ocr_moderation_reviews WHERE review_message_id = ?
+			""",
+			(review_message_id,),
+		).fetchone()
+		return dict(row) if row else None
+
+	def get_pending_ocr_moderation_review(
+		self,
+		guild_id: int,
+		target_user_id: int,
+	) -> Optional[dict]:
+		row = self.conn.execute(
+			"""
+			SELECT review_id, guild_id, target_user_id, source_message_id,
+				source_channel_id, review_message_id, review_channel_id,
+				status, action, acted_by, created_at, acted_at
+			FROM ocr_moderation_reviews
+			WHERE guild_id = ? AND target_user_id = ? AND status = 'pending'
+			ORDER BY review_id
+			LIMIT 1
+			""",
+			(guild_id, target_user_id),
+		).fetchone()
+		return dict(row) if row else None
+
+	def complete_ocr_moderation_review(
+		self,
+		review_id: int,
+		action: str,
+		acted_by: int,
+	) -> bool:
+		result = self.conn.execute(
+			"""
+			UPDATE ocr_moderation_reviews
+			SET status = 'completed', action = ?, acted_by = ?, acted_at = CURRENT_TIMESTAMP
+			WHERE review_id = ? AND status = 'pending'
+			""",
+			(action, acted_by, review_id),
+		)
+		self.conn.commit()
+		return result.rowcount > 0
 
 	def get_recycle_settings(self, guild_id: int) -> dict:
 		self.ensure_guild(guild_id)
@@ -1330,8 +1605,19 @@ class BotDatabase:
 
 	def get_due_temporary_roles(self, now: int) -> list[dict]:
 		rows = self.conn.execute(
-			"SELECT guild_id, user_id, role_id, expires_at, reason FROM temporary_roles WHERE expires_at <= ? ORDER BY expires_at",
+			"SELECT guild_id, user_id, role_id, expires_at, reason "
+			"FROM temporary_roles WHERE expires_at > 0 AND expires_at <= ? "
+			"ORDER BY expires_at",
 			(now,),
+		).fetchall()
+		return [dict(row) for row in rows]
+
+	def get_temporary_roles(self) -> list[dict]:
+		rows = self.conn.execute(
+			"""
+			SELECT guild_id, user_id, role_id, expires_at, reason
+			FROM temporary_roles ORDER BY guild_id, role_id, user_id
+			"""
 		).fetchall()
 		return [dict(row) for row in rows]
 
@@ -1431,6 +1717,86 @@ class BotDatabase:
 			(guild_id,),
 		).fetchall()
 		return {row["role_id"] for row in rows}
+
+	def set_moderator_role(self, guild_id: int, role_id: int, permission_level: int):
+		if permission_level < 1:
+			raise ValueError("Moderator permission level must be at least 1.")
+		self.ensure_guild(guild_id)
+		self.conn.execute(
+			"""
+			INSERT INTO moderator_roles (guild_id, role_id, permission_level)
+			VALUES (?, ?, ?)
+			ON CONFLICT(guild_id, role_id)
+			DO UPDATE SET permission_level = excluded.permission_level
+			""",
+			(guild_id, role_id, permission_level),
+		)
+		self.conn.commit()
+
+	def remove_moderator_role(self, guild_id: int, role_id: int) -> bool:
+		result = self.conn.execute(
+			"DELETE FROM moderator_roles WHERE guild_id = ? AND role_id = ?",
+			(guild_id, role_id),
+		)
+		self.conn.commit()
+		return result.rowcount > 0
+
+	def get_moderator_roles(self, guild_id: int) -> dict[int, int]:
+		rows = self.conn.execute(
+			"""
+			SELECT role_id, permission_level FROM moderator_roles
+			WHERE guild_id = ? ORDER BY permission_level, role_id
+			""",
+			(guild_id,),
+		).fetchall()
+		return {row["role_id"]: row["permission_level"] for row in rows}
+
+	def set_moderation_permission_level(
+		self,
+		guild_id: int,
+		feature: str,
+		permission_level: int,
+	):
+		if permission_level < 1:
+			raise ValueError("Moderation permission level must be at least 1.")
+		if feature not in {
+			MODERATION_PERMISSION_OCR_REVIEW,
+			MODERATION_PERMISSION_NAMELESS,
+		}:
+			raise ValueError("Unknown moderation permission feature.")
+		self.ensure_guild(guild_id)
+		self.conn.execute(
+			"""
+			INSERT INTO moderation_permission_levels (guild_id, feature, permission_level)
+			VALUES (?, ?, ?)
+			ON CONFLICT(guild_id, feature)
+			DO UPDATE SET permission_level = excluded.permission_level
+			""",
+			(guild_id, feature, permission_level),
+		)
+		self.conn.commit()
+
+	def get_moderation_permission_level(self, guild_id: int, feature: str) -> int:
+		self.ensure_guild(guild_id)
+		row = self.conn.execute(
+			"""
+			SELECT permission_level FROM moderation_permission_levels
+			WHERE guild_id = ? AND feature = ?
+			""",
+			(guild_id, feature),
+		).fetchone()
+		return row["permission_level"] if row else DEFAULT_MODERATION_PERMISSION_LEVEL
+
+	def get_moderation_permission_levels(self, guild_id: int) -> dict[str, int]:
+		self.ensure_guild(guild_id)
+		rows = self.conn.execute(
+			"""
+			SELECT feature, permission_level FROM moderation_permission_levels
+			WHERE guild_id = ? ORDER BY feature
+			""",
+			(guild_id,),
+		).fetchall()
+		return {row["feature"]: row["permission_level"] for row in rows}
 
 	def add_blacklisted_channel(self, guild_id: int, channel_id: int):
 		self.ensure_guild(guild_id)

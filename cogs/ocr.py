@@ -9,6 +9,7 @@ from core.database import db, FEATURE_OCR_DELETE_MESSAGE, FEATURE_OCR_GIVE_ROLE
 from core.feature_cog import attach_feature_cog, detach_feature_cog
 from core.logger import log
 from core.message_activity import message_activity
+from core.ocr_moderation import OcrModerationReviewView, ocr_moderation
 from core.permissions import require_manager
 from core.queue_worker import MESSAGE_QUEUE, start_worker
 from core.responses import send_json_chunks
@@ -24,12 +25,15 @@ class OcrCog(
 		self.worker = None
 
 	async def cog_load(self):
+		ocr_moderation.start(self.bot)
+		self.bot.add_view(OcrModerationReviewView(ocr_moderation))
 		self.worker = asyncio.create_task(start_worker(self.bot))
 
 	async def cog_unload(self):
 		detach_feature_cog(self)
 		if self.worker:
 			self.worker.cancel()
+		ocr_moderation.stop()
 
 	@commands.Cog.listener()
 	async def on_message(self, message: discord.Message):
@@ -204,25 +208,148 @@ class OcrCog(
 		db.remove_blacklisted_channel(interaction.guild_id, channel.id)
 		await interaction.response.send_message(f"{channel.mention} is no longer blacklisted.", ephemeral=True)
 
-	@app_commands.command(name="moderation", description="Set OCR moderation actions.")
-	@app_commands.describe(action="The OCR moderation action to update.", enabled="Whether the action should be enabled.")
+	@app_commands.command(name="moderation", description="Set OCR moderation actions and reviews.")
+	@app_commands.describe(
+		action="The OCR moderation setting to update.",
+		enabled="Whether the selected moderation action should be enabled.",
+		channel="Optional review channel; omit with review-channel to use the OCR log channel.",
+		direct_message="Message sent before the kick-with-message action.",
+	)
 	@app_commands.choices(action=[
 		app_commands.Choice(name="give-role", value="give-role"),
 		app_commands.Choice(name="delete-message", value="delete-message"),
+		app_commands.Choice(name="review-message", value="review-message"),
+		app_commands.Choice(name="automatic-ban", value="automatic-ban"),
+		app_commands.Choice(
+			name="automatic-kick-with-message", value="automatic-kick-with-message",
+		),
+		app_commands.Choice(name="review-channel", value="review-channel"),
+		app_commands.Choice(name="direct-message", value="direct-message"),
 	])
-	async def moderation_config(self, interaction: discord.Interaction, action: str, enabled: bool):
+	async def moderation_config(
+		self,
+		interaction: discord.Interaction,
+		action: str,
+		enabled: bool | None = None,
+		channel: discord.TextChannel | None = None,
+		direct_message: app_commands.Range[str, 1, 2000] | None = None,
+	):
 		if not await require_manager(interaction):
 			return
 		if action == "give-role":
+			if enabled is None:
+				await interaction.response.send_message("Choose `enabled`.", ephemeral=True)
+				return
 			db.set_feature_enabled(interaction.guild_id, FEATURE_OCR_GIVE_ROLE, enabled)
 			await interaction.response.send_message(
 				f"Role moderation is now {'enabled' if enabled else 'disabled'}.", ephemeral=True,
 			)
 			return
-		db.set_feature_enabled(interaction.guild_id, FEATURE_OCR_DELETE_MESSAGE, enabled)
-		await interaction.response.send_message(
-			f"Message deletion is now {'enabled' if enabled else 'disabled'}.", ephemeral=True,
-		)
+		if action == "delete-message":
+			if enabled is None:
+				await interaction.response.send_message("Choose `enabled`.", ephemeral=True)
+				return
+			db.set_feature_enabled(interaction.guild_id, FEATURE_OCR_DELETE_MESSAGE, enabled)
+			await interaction.response.send_message(
+				f"Message deletion is now {'enabled' if enabled else 'disabled'}.", ephemeral=True,
+			)
+			return
+
+		settings = db.get_ocr_moderation_settings(interaction.guild_id)
+		if action == "review-channel":
+			db.update_ocr_moderation_settings(
+				interaction.guild_id,
+				review_channel_id=channel.id if channel else None,
+			)
+			destination = channel.mention if channel else "the OCR log channel"
+			await interaction.response.send_message(
+				f"OCR review messages will use {destination}.", ephemeral=True,
+			)
+			return
+		if action == "direct-message":
+			if not direct_message:
+				await interaction.response.send_message("Provide `direct_message`.", ephemeral=True)
+				return
+			db.update_ocr_moderation_settings(
+				interaction.guild_id, direct_message=direct_message,
+			)
+			await interaction.response.send_message(
+				"OCR kick-with-message text updated.", ephemeral=True,
+			)
+			return
+
+		if enabled is None:
+			await interaction.response.send_message("Choose `enabled`.", ephemeral=True)
+			return
+		if action == "review-message":
+			effective_message = direct_message or settings["direct_message"]
+			ocr_settings = db.get_ocr_settings(interaction.guild_id)
+			effective_channel_id = (
+				channel.id if channel else settings["review_channel_id"]
+			) or ocr_settings["log_channel_id"]
+			if enabled and not effective_message:
+				await interaction.response.send_message(
+					"Set a direct message before enabling OCR review messages.", ephemeral=True,
+				)
+				return
+			if enabled and not effective_channel_id:
+				await interaction.response.send_message(
+					"Set an OCR log channel or a separate review channel first.", ephemeral=True,
+				)
+				return
+			updates = {
+				"review_enabled": enabled,
+				"automatic_action": "none" if enabled else settings["automatic_action"],
+			}
+			if channel:
+				updates["review_channel_id"] = channel.id
+			if direct_message:
+				updates["direct_message"] = direct_message
+			db.update_ocr_moderation_settings(interaction.guild_id, **updates)
+			await interaction.response.send_message(
+				f"OCR review messages are now {'enabled' if enabled else 'disabled'}.",
+				ephemeral=True,
+			)
+			return
+
+		if action == "automatic-ban":
+			new_action = "ban" if enabled else (
+				"none" if settings["automatic_action"] == "ban" else settings["automatic_action"]
+			)
+			db.update_ocr_moderation_settings(
+				interaction.guild_id,
+				automatic_action=new_action,
+				review_enabled=False if enabled else settings["review_enabled"],
+			)
+			await interaction.response.send_message(
+				f"Automatic OCR bans are now {'enabled' if enabled else 'disabled'}.", ephemeral=True,
+			)
+			return
+
+		if action == "automatic-kick-with-message":
+			effective_message = direct_message or settings["direct_message"]
+			if enabled and not effective_message:
+				await interaction.response.send_message(
+					"Set `direct_message` before enabling this action.", ephemeral=True,
+				)
+				return
+			new_action = "kick_with_message" if enabled else (
+				"none"
+				if settings["automatic_action"] == "kick_with_message"
+				else settings["automatic_action"]
+			)
+			updates = {
+				"automatic_action": new_action,
+				"review_enabled": False if enabled else settings["review_enabled"],
+			}
+			if direct_message:
+				updates["direct_message"] = direct_message
+			db.update_ocr_moderation_settings(interaction.guild_id, **updates)
+			await interaction.response.send_message(
+				"Automatic OCR kick-with-message is now "
+				f"{'enabled' if enabled else 'disabled'}.",
+				ephemeral=True,
+			)
 
 
 async def setup(bot):

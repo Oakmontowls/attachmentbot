@@ -14,6 +14,11 @@ AttachmentBot is a Discord moderation bot focused on detecting image-based scam 
 - Reuploads detected images in a separate log message.
 - Saves images under `detected images/` if Discord rejects the reupload.
 - Can delete detected messages and assign the configured timeout role.
+- Can send persistent, role-gated moderation review messages with Ban, Kick with message, and Ignore buttons, while limiting each detected user to one pending review at a time.
+- Review messages can use a separate channel or fall back to the OCR detection log channel.
+- Review messages link back to the corresponding OCR detection log entry.
+- Can automatically ban detected accounts or DM and remove them with a ban/unban action.
+- OCR bans preserve message history and use `Compromised or hacked account` as the audit-log reason.
 - Supports channel blacklists.
 
 ### Pressure moderation
@@ -32,7 +37,15 @@ AttachmentBot is a Discord moderation bot focused on detecting image-based scam 
 - Settings are stored per server in `attachmentbot.sqlite3`.
 - New servers receive disabled default OCR and pressure settings with a built-in keyword configuration.
 - Administrators can designate manager roles that are allowed to configure the bot.
+- Multiple moderator roles can be assigned permission levels without receiving configuration access. Level 1 is highest, and lower-numbered levels inherit access to features requiring higher-numbered levels.
 - Moderation features are structured separately so additional moderation systems can reuse shared settings and temporary-role handling.
+
+### Manual timeouts
+
+- `/nameless` lets Administrators, manager roles, and moderator roles meeting its configured permission level assign the timeout role.
+- Accepts a duration in minutes, with `-1` representing an indefinite timeout, and a required reason.
+- Logs the member, moderator, duration, and reason to a separately configured timeout log channel.
+- Persists finite and indefinite assignments and reconciles expired or stale role records when the bot starts.
 
 ### Territory tracking
 
@@ -84,6 +97,10 @@ All commands begin with `/ab`.
 - `/ab status` shows the server configuration.
 - `/ab manager` manages roles allowed to configure the bot.
 - `/ab timeout-role` selects the role used for moderation timeouts.
+- `/ab moderator-role` adds, updates, or removes moderator roles and their permission levels.
+- `/ab permission-level` sets the moderator permission level required for OCR review moderation or `/nameless`.
+- `/ab timeoutlogchannel` selects the channel used for manual timeout audit logs.
+- `/nameless` assigns the configured timeout role for a specified number of minutes or indefinitely.
 - `/ab ocr` contains OCR settings, keyword and alias management, channel blacklists, moderation actions, and single-image scanning settings.
 - `/ab pressure` contains pressure settings, channel thresholds, banned words, current-pressure viewing, and pressure resets.
 - `/territory leaderboard` shows the public rolling 24-hour message leaderboard.
@@ -93,6 +110,8 @@ All commands begin with `/ab`.
 - `/ab respond` enables automatic responses and manages text, regex, and sticker-ID triggers with configurable chances and cooldowns.
 
 Configuration commands require either the Discord Administrator permission or a manager role configured by an administrator.
+
+OCR moderation reviews are configured through `/ab ocr moderation`. Add moderator roles with `/ab moderator-role`, set the OCR requirement with `/ab permission-level`, set the direct message, optionally set a separate review channel, and then enable review messages. Administrators and manager roles bypass moderator permission levels. Omitting the review channel when using `review-channel` restores fallback to the OCR log channel. Automatic Ban and Automatic Kick with message disable interactive review mode, while enabling review mode disables either automatic action.
 
 ## Optional modules
 
@@ -129,7 +148,7 @@ $env:DISCORD_TOKEN="your-token"
 python main.py
 ```
 
-Invite the bot with the `bot` and `applications.commands` OAuth scopes. It needs access to read channel history and messages, send messages and attachments, embed links, manage messages, and manage the configured timeout role. The bot's role must be above the timeout role in Discord's role hierarchy.
+Invite the bot with the `bot` and `applications.commands` OAuth scopes. It needs access to read channel history and messages, send messages and attachments, embed links, manage messages, ban members when OCR account-removal actions are enabled, and manage the configured timeout role. The bot's role must be above the timeout role and any members it needs to moderate in Discord's role hierarchy.
 
 Do not commit bot tokens, the SQLite database, logs, or locally saved detected images.
 

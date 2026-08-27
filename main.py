@@ -8,7 +8,7 @@ from config import TOKEN as CONFIG_TOKEN
 
 log = setup_logger()
 
-REQUIRED_EXTENSIONS = ("cogs.base", "cogs.activity")
+REQUIRED_EXTENSIONS = ("cogs.base", "cogs.activity", "cogs.timeouts")
 OPTIONAL_MODULES = ("ocr", "pressure", "territory", "recycle", "relay", "respond")
 
 intents = discord.Intents.default()

@@ -2,24 +2,26 @@ import discord
 from utils.ocr import run_ocr
 from utils.hashing import phash_bytes
 from utils.keywords import score
-import aiohttp
 import asyncio
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 from core.logger import log
 from core.database import db, FEATURE_OCR_DELETE_MESSAGE, FEATURE_OCR_GIVE_ROLE
+from core.ocr_moderation import ocr_moderation
 
 MAX_LOG_FILES = 10
 DETECTED_IMAGES_DIR = Path("detected images")
 
 
-async def download_image(url):
-	async with aiohttp.ClientSession() as session:
-		async with session.get(url) as resp:
-			if resp.status == 200:
-				return await resp.read()
-	return None
+async def download_image(attachment: discord.Attachment):
+	try:
+		return await attachment.read(use_cached=True)
+	except discord.DiscordException as exc:
+		log.info(
+			f"[IMAGE DOWNLOAD ERROR] attachment={attachment.id} error={exc}"
+		)
+		return None
 
 
 def log_filename(index: int, attachment: discord.Attachment) -> str:
@@ -76,7 +78,7 @@ async def process_message_pipeline(bot, message: discord.Message):
 
 	for idx, att in enumerate(image_attachments):
 
-		image_bytes = await download_image(att.url)
+		image_bytes = await download_image(att)
 		if not image_bytes:
 			continue
 		downloaded_images[idx] = image_bytes
@@ -105,7 +107,7 @@ async def process_message_pipeline(bot, message: discord.Message):
 	for idx, att in enumerate(image_attachments):
 		if idx in downloaded_images:
 			continue
-		image_bytes = await download_image(att.url)
+		image_bytes = await download_image(att)
 		if image_bytes:
 			downloaded_images[idx] = image_bytes
 
@@ -167,15 +169,23 @@ async def process_message_pipeline(bot, message: discord.Message):
 			log.info(f"[DELETE ERROR] message={message.id} error={exc}")
 
 	# ---------------- SEND ----------------
+	detection_log_message = None
 	if log_channel:
 		try:
-			await log_channel.send(embed=embed)
+			detection_log_message = await log_channel.send(embed=embed)
 			if files:
 				await log_channel.send(files=files)
 		except discord.DiscordException as exc:
 			log.info(f"[LOG SEND ERROR] message={message.id} error={exc}")
 			output_dir = save_detected_images(message, image_attachments, downloaded_images)
-			await log_channel.send(
-				f"Image reupload failed for detected message {message.id}. "
-				f"Saved locally to `{output_dir}`."
-			)
+			try:
+				await log_channel.send(
+					f"Image reupload failed for detected message {message.id}. "
+					f"Saved locally to `{output_dir}`."
+				)
+			except discord.DiscordException as fallback_exc:
+				log.info(
+					f"[LOG FALLBACK ERROR] message={message.id} error={fallback_exc}"
+				)
+
+	await ocr_moderation.handle_detection(message, config, detection_log_message)

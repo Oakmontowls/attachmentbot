@@ -1,5 +1,6 @@
 import asyncio
 import re
+import subprocess
 import tempfile
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
@@ -148,12 +149,10 @@ def history_cutoff_id(days: int) -> int:
 	return discord.utils.time_snowflake(cutoff, high=False)
 
 
-async def video_frame_bytes(video_bytes: bytes) -> bytes:
-	with tempfile.TemporaryDirectory(prefix="attachmentbot-video-") as temp_dir:
-		input_path = Path(temp_dir) / "input.video"
-		await asyncio.to_thread(input_path.write_bytes, video_bytes)
-		try:
-			process = await asyncio.create_subprocess_exec(
+def _extract_video_frame(input_path: Path) -> bytes:
+	try:
+		process = subprocess.run(
+			[
 				"ffmpeg",
 				"-hide_banner",
 				"-loglevel", "error",
@@ -163,28 +162,31 @@ async def video_frame_bytes(video_bytes: bytes) -> bytes:
 				"-f", "image2pipe",
 				"-vcodec", "png",
 				"pipe:1",
-				stdin=asyncio.subprocess.DEVNULL,
-				stdout=asyncio.subprocess.PIPE,
-				stderr=asyncio.subprocess.PIPE,
-			)
-		except FileNotFoundError as exc:
-			raise RuntimeError("ffmpeg is not installed or is not on PATH") from exc
+			],
+			stdin=subprocess.DEVNULL,
+			stdout=subprocess.PIPE,
+			stderr=subprocess.PIPE,
+			timeout=VIDEO_HASH_TIMEOUT_SECONDS,
+			check=False,
+		)
+	except FileNotFoundError as exc:
+		raise RuntimeError("ffmpeg is not installed or is not on PATH") from exc
+	except subprocess.TimeoutExpired as exc:
+		raise RuntimeError(
+			f"ffmpeg exceeded the {VIDEO_HASH_TIMEOUT_SECONDS}-second timeout"
+		) from exc
 
-		try:
-			stdout, stderr = await asyncio.wait_for(
-				process.communicate(),
-				timeout=VIDEO_HASH_TIMEOUT_SECONDS,
-			)
-		except asyncio.TimeoutError as exc:
-			process.kill()
-			await process.communicate()
-			raise RuntimeError(
-				f"ffmpeg exceeded the {VIDEO_HASH_TIMEOUT_SECONDS}-second timeout"
-			) from exc
-		if process.returncode or not stdout:
-			error = stderr.decode("utf-8", errors="replace").strip()
-			raise RuntimeError(error or f"ffmpeg exited with status {process.returncode}")
-		return stdout
+	if process.returncode or not process.stdout:
+		error = process.stderr.decode("utf-8", errors="replace").strip()
+		raise RuntimeError(error or f"ffmpeg exited with status {process.returncode}")
+	return process.stdout
+
+
+async def video_frame_bytes(video_bytes: bytes) -> bytes:
+	with tempfile.TemporaryDirectory(prefix="attachmentbot-video-") as temp_dir:
+		input_path = Path(temp_dir) / "input.video"
+		await asyncio.to_thread(input_path.write_bytes, video_bytes)
+		return await asyncio.to_thread(_extract_video_frame, input_path)
 
 
 def jump_url(message: discord.Message, original_message_id: int | None = None) -> str:
