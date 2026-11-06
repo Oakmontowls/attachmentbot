@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Explore Discord message activity across channels, members, forums, and threads.">
+  <title>Message Observatory</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand"><span class="brand-mark">M</span><span>Message<br>Observatory</span></div>
+      <nav aria-label="Dashboard views">
+        <button class="nav-item active" data-view="overview"><span>01</span>Overview</button>
+        <button class="nav-item" data-view="messages"><span>02</span>Messages</button>
+        <button class="nav-item" data-view="channels"><span>03</span>Channels</button>
+        <button class="nav-item" data-view="members"><span>04</span>Members</button>
+        <button class="nav-item" data-view="forums"><span>05</span>Forums</button>
+      </nav>
+      <div class="collector-state"><i></i><div><strong>Collector database</strong><small id="updated-at">Connecting…</small></div></div>
+    </aside>
+
+    <main>
+      <header class="topbar">
+        <div>
+          <p class="eyebrow" id="view-kicker">Server pulse</p>
+          <h1 id="view-title">Overview</h1>
+        </div>
+        <button class="refresh" id="refresh" aria-label="Refresh statistics">Refresh <span>↻</span></button>
+      </header>
+
+      <section class="filterbar" aria-label="Report filters">
+        <label>Server<select id="guild"></select></label>
+        <label>Time window<select id="period">
+          <option value="1">Last 24 hours</option>
+          <option value="7">Last 7 days</option>
+          <option value="14" selected>Last 14 days</option>
+          <option value="30">Last 30 days</option>
+          <option value="90">Last 90 days</option>
+          <option value="365">Last year</option>
+          <option value="all">All tracked time</option>
+          <option value="custom">Custom range</option>
+        </select></label>
+        <label>Channel / forum<select id="scope"><option value="">All locations</option></select></label>
+        <label>Member<input id="member" list="member-options" placeholder="All members"></label>
+        <datalist id="member-options"></datalist>
+        <div class="custom-dates" id="custom-dates">
+          <label>From<input type="date" id="date-from"></label>
+          <label>To<input type="date" id="date-to"></label>
+        </div>
+        <button class="apply" id="apply">Run report</button>
+      </section>
+
+      <div class="notice hidden" id="notice" role="alert"></div>
+      <div class="loading" id="loading"><span></span><p>Reading message history…</p></div>
+
+      <div id="dashboard" class="hidden">
+        <section class="metrics" aria-label="Key statistics">
+          <article><span>Messages</span><strong id="metric-messages">—</strong><small id="metric-range">selected range</small></article>
+          <article><span>Contributors</span><strong id="metric-members">—</strong><small>unique members</small></article>
+          <article><span>Active locations</span><strong id="metric-locations">—</strong><small>channels and threads</small></article>
+          <article class="accent"><span>Average</span><strong id="metric-average">—</strong><small>per active day</small></article>
+        </section>
+
+        <section class="panel chart-panel" data-section="overview messages">
+          <div class="panel-heading"><div><p class="eyebrow">Volume over time</p><h2>Message rhythm</h2></div><div class="peak" id="peak">Peak —</div></div>
+          <div id="timeline" class="timeline" role="img" aria-label="Message volume chart"></div>
+        </section>
+
+        <section class="two-column" data-section="overview">
+          <article class="panel"><div class="panel-heading"><div><p class="eyebrow">Leaderboard</p><h2>Top members</h2></div></div><div id="top-members-compact" class="rank-list"></div></article>
+          <article class="panel"><div class="panel-heading"><div><p class="eyebrow">Where it happens</p><h2>Top locations</h2></div></div><div id="top-locations-compact" class="rank-list"></div></article>
+        </section>
+
+        <section class="panel" data-section="messages">
+          <div class="panel-heading"><div><p class="eyebrow">UTC activity</p><h2>Week × hour</h2></div><div class="heat-legend"><span>Quiet</span><i></i><i></i><i></i><i></i><span>Busy</span></div></div>
+          <div id="heatmap" class="heatmap"></div>
+        </section>
+
+        <section class="panel" data-section="channels">
+          <div class="panel-heading"><div><p class="eyebrow">All locations</p><h2>Channel & thread ranking</h2></div></div>
+          <div class="table-wrap"><table><thead><tr><th>Rank</th><th>Location</th><th>Type</th><th>Contributors</th><th>Messages</th></tr></thead><tbody id="locations-table"></tbody></table></div>
+        </section>
+
+        <section class="panel" data-section="members">
+          <div class="panel-heading"><div><p class="eyebrow">Contributors</p><h2>Member ranking</h2></div></div>
+          <div class="table-wrap"><table><thead><tr><th>Rank</th><th>Member</th><th>Locations</th><th>Messages</th><th>Share</th></tr></thead><tbody id="members-table"></tbody></table></div>
+        </section>
+
+        <section class="panel" data-section="forums">
+          <div class="panel-heading"><div><p class="eyebrow">Forum rollups</p><h2>Forums and their posts</h2></div></div>
+          <div class="table-wrap"><table><thead><tr><th>Rank</th><th>Forum</th><th>Posts</th><th>Contributors</th><th>Messages</th></tr></thead><tbody id="forums-table"></tbody></table></div>
+          <div class="forum-subsection">
+            <p class="eyebrow">Post drilldown</p><h2>Individual forum threads</h2>
+            <div class="table-wrap"><table><thead><tr><th>Rank</th><th>Post</th><th>Forum</th><th>Contributors</th><th>Messages</th></tr></thead><tbody id="forum-threads-table"></tbody></table></div>
+          </div>
+          <div class="forum-note">Choose a forum above to limit this thread ranking to one forum.</div>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <dialog id="auth-dialog">
+    <form method="dialog" id="auth-form">
+      <p class="eyebrow">Protected dashboard</p><h2>Enter access token</h2>
+      <p>The reporting API requires the token configured on this server.</p>
+      <input type="password" id="token" autocomplete="current-password" autofocus>
+      <button class="apply" value="default">Unlock dashboard</button>
+    </form>
+  </dialog>
+  <script src="/app.js" defer></script>
+</body>
+</html>

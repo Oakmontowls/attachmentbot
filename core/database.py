@@ -141,6 +141,7 @@ class BotDatabase:
 				decay_per_second REAL NOT NULL DEFAULT 3.3,
 				base_pressure INTEGER NOT NULL DEFAULT 10,
 				attachment_pressure INTEGER NOT NULL DEFAULT 15,
+				additional_image_pressure INTEGER NOT NULL DEFAULT 15,
 				embed_pressure INTEGER NOT NULL DEFAULT 15,
 				mention_pressure INTEGER NOT NULL DEFAULT 10,
 				link_pressure INTEGER NOT NULL DEFAULT 15,
@@ -434,6 +435,7 @@ class BotDatabase:
 		existing = {row["name"] for row in rows}
 		columns = {
 			"log_channel_id": "INTEGER",
+			"additional_image_pressure": "INTEGER NOT NULL DEFAULT 15",
 			"line_pressure": "INTEGER NOT NULL DEFAULT 5",
 			"solo_emote_pressure": "INTEGER NOT NULL DEFAULT 30",
 			"gif_pressure": "INTEGER NOT NULL DEFAULT 50",
@@ -443,6 +445,11 @@ class BotDatabase:
 		for column, definition in columns.items():
 			if column not in existing:
 				self.conn.execute(f"ALTER TABLE pressure_settings ADD COLUMN {column} {definition}")
+				if column == "additional_image_pressure":
+					self.conn.execute(
+						"UPDATE pressure_settings "
+						"SET additional_image_pressure = attachment_pressure"
+					)
 
 	def add_missing_territory_columns(self):
 		rows = self.conn.execute("PRAGMA table_info(territory_settings)").fetchall()
@@ -502,6 +509,7 @@ class BotDatabase:
 			"threshold",
 			"base_pressure",
 			"attachment_pressure",
+			"additional_image_pressure",
 			"embed_pressure",
 			"mention_pressure",
 			"link_pressure",
@@ -530,6 +538,7 @@ class BotDatabase:
 				decay_per_second = 3.3,
 				base_pressure = 10,
 				attachment_pressure = 15,
+				additional_image_pressure = 15,
 				embed_pressure = 15,
 				mention_pressure = 10,
 				link_pressure = 15,

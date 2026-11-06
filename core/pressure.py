@@ -202,7 +202,11 @@ class PressureModerator:
 		]
 
 		if image_attachments:
-			value = len(image_attachments) * settings["attachment_pressure"]
+			additional_count = len(image_attachments) - 1
+			value = (
+				settings["attachment_pressure"]
+				+ additional_count * settings["additional_image_pressure"]
+			)
 			increment += value
 			reasons.append(f"images +{value}")
 

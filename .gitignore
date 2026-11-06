@@ -7,3 +7,4 @@ live data/
 bot_debug.log*
 testbottoken.txt
 detected images/
+message_stats_bot/*.sqlite3*

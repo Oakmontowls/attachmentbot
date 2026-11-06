@@ -24,7 +24,7 @@ AttachmentBot is a Discord moderation bot focused on detecting image-based scam 
 ### Pressure moderation
 
 - Tracks pressure separately for each member and channel.
-- Adds pressure for message activity such as attachments, mentions, links, repeated messages, line breaks, solo emotes, GIFs, and banned words.
+- Adds separately configurable pressure for the first image and each additional image, along with mentions, links, repeated messages, line breaks, solo emotes, GIFs, and banned words.
 - Gradually reduces pressure over time.
 - Supports a global threshold and per-channel threshold overrides, including forum channels and their threads.
 - Can delete messages posted at or above the threshold.
@@ -151,6 +151,17 @@ python main.py
 Invite the bot with the `bot` and `applications.commands` OAuth scopes. It needs access to read channel history and messages, send messages and attachments, embed links, manage messages, ban members when OCR account-removal actions are enabled, and manage the configured timeout role. The bot's role must be above the timeout role and any members it needs to moderate in Discord's role hierarchy.
 
 Do not commit bot tokens, the SQLite database, logs, or locally saved detected images.
+
+## Standalone message statistics bot
+
+[`message_stats_bot/README.md`](message_stats_bot/README.md) documents the separate,
+collection-only statistics bot for a backend viewer. It records message activity in
+regular channels, threads, and forum posts, including parent forum IDs for rollups.
+It exposes no Discord commands, does not track voice or game activity, and does not
+read or store message content.
+
+The same directory also contains a local, read-only web dashboard for server,
+channel, member, forum, and individual forum-thread reporting.
 
 ## Standalone duplicate detector
 

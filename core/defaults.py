@@ -118,6 +118,7 @@ DEFAULT_PRESSURE_SETTINGS = {
 	"decay_per_second": 3.3,
 	"base_pressure": 10,
 	"attachment_pressure": 15,
+	"additional_image_pressure": 15,
 	"embed_pressure": 15,
 	"mention_pressure": 10,
 	"link_pressure": 15,
